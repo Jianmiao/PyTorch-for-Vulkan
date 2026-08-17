@@ -1,5 +1,8 @@
 #include <ATen/native/vulkan/api/Context.h>
 
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <sstream>
@@ -76,6 +79,19 @@ void Context::register_shader_dispatch(
     PipelineBarrier& pipeline_barrier,
     const ShaderInfo& shader_descriptor,
     const utils::uvec3& global_workgroup_size) {
+  if (std::getenv("VK_TRACE")) {
+    static std::atomic<uint64_t> op_count{0};
+    std::fprintf(
+        stderr,
+        "[%llu] shader %s wg=%u,%u,%u\n",
+        (unsigned long long)op_count.fetch_add(1),
+        shader_descriptor.kernel_name.c_str(),
+        (unsigned)global_workgroup_size.data[0u],
+        (unsigned)global_workgroup_size.data[1u],
+        (unsigned)global_workgroup_size.data[2u]);
+    static thread_local std::string last_shader;
+    last_shader = shader_descriptor.kernel_name;
+  }
   // Adjust the global workgroup size based on the output tile size
   const utils::uvec3 effective_global_wg = {
       utils::div_up(
@@ -102,11 +118,18 @@ void Context::submit_cmd_to_gpu(VkFence fence_handle, const bool final_use) {
         queue_, cmd_.get_submit_handle(final_use), fence_handle);
 
     submit_count_ = 0u;
+    if (++dispatches_since_flush_ >= 4u) {
+      flush();
+    }
   }
 }
 
 void Context::flush() {
+  if (std::getenv("VK_TRACE")) {
+    std::fprintf(stderr, "[flush] dispatches_since_flush=%u\n", dispatches_since_flush_);
+  }
   VK_CHECK(vkQueueWaitIdle(queue()));
+  dispatches_since_flush_ = 0u;
 
   command_pool_.flush();
   descriptor_pool_.flush();
@@ -135,7 +158,6 @@ Context* context() {
           32u, // cmdPoolInitialSize
           8u, // cmdPoolBatchSize
       };
-
       const DescriptorPoolConfig descriptor_pool_config{
           VULKAN_DESCRIPTOR_POOL_SIZE, // descriptorPoolMaxSets
           VULKAN_DESCRIPTOR_POOL_SIZE, // descriptorUniformBufferCount

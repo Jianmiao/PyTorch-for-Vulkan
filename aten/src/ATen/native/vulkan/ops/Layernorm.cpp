@@ -11,6 +11,7 @@
 #include <ATen/Functions.h>
 #else
 #include <ATen/ops/native_layer_norm.h>
+#include "ssbo/SsboBackend.h"
 #endif
 
 namespace at {
@@ -85,6 +86,8 @@ static Tensor layer_norm(
     const std::optional<Tensor>& bias_opt /* optional */,
     double eps,
     bool /* cudnn_enable, deprecated */) {
+  Tensor r = at::native::vulkan::ops::ssbo::layer_norm(input_arg, normalized_shape, weight_opt, bias_opt, eps);
+  if (r.defined()) return r;
   return run_layernorm_context(
       input_arg,
       normalized_shape,

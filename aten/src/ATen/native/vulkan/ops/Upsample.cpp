@@ -2,6 +2,7 @@
 #include <ATen/native/vulkan/ops/Common.h>
 #include <ATen/native/vulkan/ops/QuantizedFunctions.h>
 #include <torch/library.h>
+#include "ssbo/SsboBackend.h"
 
 namespace at {
 namespace native {
@@ -14,6 +15,8 @@ static Tensor upsample_nearest2d(
     const IntArrayRef output_sizes,
     const std::optional<double> scales_h,
     const std::optional<double> scales_w) {
+  Tensor r = at::native::vulkan::ops::ssbo::upsample(input_arg, output_sizes, false);
+  if (r.defined()) return r;
   api::Context* const context = api::context();
 
   TORCH_CHECK(
@@ -100,6 +103,8 @@ static Tensor upsample_bilinear2d(
     bool align_corners,
     const std::optional<double> scales_h,
     const std::optional<double> scales_w) {
+  Tensor r = at::native::vulkan::ops::ssbo::upsample(input_arg, output_sizes, true);
+  if (r.defined()) return r;
   api::Context* const context = api::context();
 
   TORCH_CHECK(

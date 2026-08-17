@@ -4,6 +4,7 @@
 #include <ATen/native/vulkan/ops/QuantizedFunctions.h>
 #include <ATen/native/vulkan/ops/Utils.h>
 #include <torch/library.h>
+#include "ssbo/SsboBackend.h"
 
 namespace at {
 namespace native {
@@ -163,6 +164,24 @@ static Tensor binary_op_tensor(
   Tensor other = binary_op_preprocess_other_arg(other_arg);
 
   const vTensor& v_other = convert(other);
+
+  if (std::getenv("VK_TRACE")) {
+    std::fprintf(
+        stderr,
+        "[binop] self=%lld,%lld,%lld,%lld other=%lld,%lld,%lld,%lld bcast=%lld,%lld,%lld,%lld\n",
+        (long long)(self_arg.dim() > 0 ? self_arg.size(0) : 1),
+        (long long)(self_arg.dim() > 1 ? self_arg.size(1) : 1),
+        (long long)(self_arg.dim() > 2 ? self_arg.size(2) : 1),
+        (long long)(self_arg.dim() > 3 ? self_arg.size(3) : 1),
+        (long long)(other_arg.dim() > 0 ? other_arg.size(0) : 1),
+        (long long)(other_arg.dim() > 1 ? other_arg.size(1) : 1),
+        (long long)(other_arg.dim() > 2 ? other_arg.size(2) : 1),
+        (long long)(other_arg.dim() > 3 ? other_arg.size(3) : 1),
+        (long long)(utils::broadcast_size(self_arg, other_arg).size() > 0 ? utils::broadcast_size(self_arg, other_arg)[0] : 1),
+        (long long)(utils::broadcast_size(self_arg, other_arg).size() > 1 ? utils::broadcast_size(self_arg, other_arg)[1] : 1),
+        (long long)(utils::broadcast_size(self_arg, other_arg).size() > 2 ? utils::broadcast_size(self_arg, other_arg)[2] : 1),
+        (long long)(utils::broadcast_size(self_arg, other_arg).size() > 3 ? utils::broadcast_size(self_arg, other_arg)[3] : 1));
+  }
 
   vTensor v_output{
       context,
@@ -440,6 +459,10 @@ static Tensor add_tensor(
     const Tensor& self_arg,
     const Tensor& other_arg,
     const Scalar& alpha) {
+  if (alpha.to<double>() == 1.0) {
+    Tensor r = at::native::vulkan::ops::ssbo::elementwise_binary(self_arg, other_arg, 0);
+    if (r.defined()) return r;
+  }
   return binary_op_tensor(
       self_arg, other_arg, std::optional<Scalar>(alpha), VK_KERNEL(add));
 }
@@ -478,6 +501,10 @@ static Tensor sub_tensor(
     const Tensor& self_arg,
     const Tensor& other_arg,
     const Scalar& alpha) {
+  if (alpha.to<double>() == 1.0) {
+    Tensor r = at::native::vulkan::ops::ssbo::elementwise_binary(self_arg, other_arg, 1);
+    if (r.defined()) return r;
+  }
   return binary_op_tensor(
       self_arg, other_arg, std::optional<Scalar>(alpha), VK_KERNEL(sub));
 }
@@ -501,6 +528,8 @@ static Tensor& mul_scalar_(Tensor& self, const Scalar& other) {
 }
 
 static Tensor mul_tensor(const Tensor& self_arg, const Tensor& other_arg) {
+  Tensor r = at::native::vulkan::ops::ssbo::elementwise_binary(self_arg, other_arg, 2);
+  if (r.defined()) return r;
   return binary_op_tensor(
       self_arg, other_arg, std::optional<Scalar>(), VK_KERNEL(mul));
 }
@@ -527,6 +556,8 @@ static Tensor& div_scalar_(Tensor& self, const Scalar& other) {
 }
 
 static Tensor div_tensor(const Tensor& self_arg, const Tensor& other_arg) {
+  Tensor r = at::native::vulkan::ops::ssbo::elementwise_binary(self_arg, other_arg, 3);
+  if (r.defined()) return r;
   return binary_op_tensor(
       self_arg, other_arg, std::optional<Scalar>(), VK_KERNEL(div));
 }

@@ -24,6 +24,17 @@ PhysicalDevice::PhysicalDevice(VkPhysicalDevice physical_device_handle)
   vkGetPhysicalDeviceProperties(handle, &properties);
   vkGetPhysicalDeviceMemoryProperties(handle, &memory_properties);
 
+  if (std::getenv("VK_TRACE")) {
+    for (size_t i = 0; i < memory_properties.memoryTypeCount; ++i) {
+      const VkMemoryType& t = memory_properties.memoryTypes[i];
+      uint32_t heap_idx = t.heapIndex;
+      std::fprintf(stderr,
+          "[mem] type=%zu heap=%u flags=0x%x heap_size=%.2f GiB\n",
+          i, heap_idx, t.propertyFlags,
+          (double)memory_properties.memoryHeaps[heap_idx].size / (1024.0 * 1024.0 * 1024.0));
+    }
+  }
+
   // Check if there are any memory types have both the HOST_VISIBLE and the
   // DEVICE_LOCAL property flags
   const VkMemoryPropertyFlags unified_memory_flags =

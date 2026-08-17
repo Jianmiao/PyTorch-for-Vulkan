@@ -3,6 +3,7 @@
 #include <ATen/native/vulkan/ops/QuantizedFunctions.h>
 #include <torch/library.h>
 #include <vector>
+#include "ssbo/SsboBackend.h"
 
 namespace at {
 namespace native {
@@ -102,6 +103,8 @@ Tensor& unary_op_(Tensor& self_arg, const api::ShaderInfo& shader_descriptor) {
 }
 
 Tensor exp(const Tensor& self_arg) {
+  Tensor r = at::native::vulkan::ops::ssbo::elementwise_scalar(self_arg, 0.0, 10);
+  if (r.defined()) return r;
   return unary_op(self_arg, VK_KERNEL(exp));
 }
 
@@ -110,6 +113,8 @@ Tensor& exp_(Tensor& self_arg) {
 }
 
 Tensor sqrt(const Tensor& self_arg) {
+  Tensor r = at::native::vulkan::ops::ssbo::elementwise_scalar(self_arg, 0.0, 9);
+  if (r.defined()) return r;
   return unary_op(self_arg, VK_KERNEL(sqrt));
 }
 

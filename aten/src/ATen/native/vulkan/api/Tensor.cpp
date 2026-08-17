@@ -1,6 +1,8 @@
 #include <ATen/native/vulkan/api/Tensor.h>
 #include <ATen/native/vulkan/api/Utils.h>
 
+#include <cstdio>
+
 namespace at {
 namespace native {
 namespace vulkan {
@@ -549,7 +551,18 @@ vTensorStorage::vTensorStorage(
           storage_type_,
           dtype,
           allocate_memory)),
-      last_access_{} {}
+      last_access_{} {
+  if (std::getenv("VK_TRACE") && storage_type == api::StorageType::TEXTURE_2D) {
+    std::fprintf(
+        stderr,
+        "[T2D] gpu_sizes=%lld,%lld,%lld,%lld ext=%u,%u,%u dtype=%d\n",
+        (long long)(gpu_sizes.size() > 0 ? gpu_sizes[0] : 0),
+        (long long)(gpu_sizes.size() > 1 ? gpu_sizes[1] : 0),
+        (long long)(gpu_sizes.size() > 2 ? gpu_sizes[2] : 0),
+        (long long)(gpu_sizes.size() > 3 ? gpu_sizes[3] : 0),
+        extents_.data[0], extents_.data[1], extents_.data[2], (int)dtype);
+  }
+}
 
 vTensorStorage::~vTensorStorage() {
   flush();

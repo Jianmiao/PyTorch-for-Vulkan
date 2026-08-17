@@ -1,5 +1,10 @@
+#ifndef _USE_MATH_DEFINES
+#define _USE_MATH_DEFINES
+#endif
 #include <ATen/native/vulkan/ops/Common.h>
 #include <torch/library.h>
+#include <cmath>
+#include "ssbo/SsboBackend.h"
 
 namespace at {
 namespace native {
@@ -502,6 +507,8 @@ Tensor& activation_scalar_(
 }
 
 Tensor gelu(const Tensor& self, std::string_view approximate) {
+  Tensor r = at::native::vulkan::ops::ssbo::gelu(self);
+  if (r.defined()) return r;
   TORCH_CHECK(
       approximate == "tanh", "Vulkan: gelu only supported for tanh type");
   Scalar kBetaVec = M_SQRT2 * M_2_SQRTPI * 0.5;
@@ -568,6 +575,8 @@ Tensor& leaky_relu_(Tensor& self, const Scalar& negative_slope) {
 }
 
 Tensor sigmoid(const Tensor& self) {
+  Tensor r = at::native::vulkan::ops::ssbo::sigmoid(self);
+  if (r.defined()) return r;
   return ops::activation(self, VK_KERNEL(sigmoid));
 }
 
@@ -576,6 +585,8 @@ Tensor& sigmoid_(Tensor& self) {
 }
 
 Tensor tanh(const Tensor& self) {
+  Tensor r = at::native::vulkan::ops::ssbo::tanh(self);
+  if (r.defined()) return r;
   return ops::activation(self, VK_KERNEL(tanh));
 }
 

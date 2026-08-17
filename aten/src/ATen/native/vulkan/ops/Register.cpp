@@ -12,6 +12,7 @@
 #include <ATen/native/vulkan/ops/Register.h>
 #include <torch/custom_class.h>
 #include <torch/library.h>
+#include "ssbo/SsboBackend.h"
 
 namespace at {
 namespace native {
@@ -140,6 +141,7 @@ TORCH_LIBRARY(vulkan, m) {
   register_vulkan_conv1d_packed_context();
   register_vulkan_linear_packed_context();
   register_vulkan_layernorm_packed_context();
+  // SSBO ops registered via TORCH_LIBRARY_IMPL in ssbo/SsboBackend.cpp
   // To maintain backwards compatibility.
   m.class_<Conv2dOpContext>("Conv2dOpContext")
       .def_pickle(

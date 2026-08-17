@@ -1,6 +1,9 @@
 #include <ATen/native/vulkan/api/Adapter.h>
 #include <ATen/native/vulkan/api/Resource.h>
 
+#include <cstdio>
+#include <cstdlib>
+
 namespace at {
 namespace native {
 namespace vulkan {
@@ -395,16 +398,47 @@ VulkanImage::VulkanImage(
   memory_.create_info = allocation_create_info;
 
   if (allocate_memory) {
-    VK_CHECK(vmaCreateImage(
+    if (std::getenv("VK_TRACE")) {
+      VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
+      vmaGetHeapBudgets(allocator_, budgets);
+      VmaTotalStatistics stats{};
+      vmaCalculateStatistics(allocator_, &stats);
+      std::fprintf(
+          stderr,
+          "[mem] image %ux%ux%u fmt=%d alloc_bytes=%llu heap0_used=%llu heap0_budget=%llu total_block_bytes=%llu\n",
+          image_props.image_extents.width,
+          image_props.image_extents.height,
+          image_props.image_extents.depth,
+          (int)image_props.image_format,
+          (unsigned long long)stats.total.statistics.allocationBytes,
+          (unsigned long long)budgets[0].usage,
+          (unsigned long long)budgets[0].budget,
+          (unsigned long long)stats.total.statistics.blockBytes);
+    }
+    VkResult vma_res = vmaCreateImage(
         allocator_,
         &image_create_info,
         &allocation_create_info,
         &(handles_.image),
         &(memory_.allocation),
-        nullptr));
+        nullptr);
+            if (vma_res != VK_SUCCESS) {
+      VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
+      vmaGetHeapBudgets(allocator_, budgets);
+      std::fprintf(
+          stderr,
+          "[mem-FAIL] res=%d image %ux%ux%u fmt=%d req_flags=0x%x heap0_used=%llu heap0_budget=%llu\n",
+          (int)vma_res,
+          image_props.image_extents.width,
+          image_props.image_extents.height,
+          image_props.image_extents.depth,
+          (int)image_props.image_format,
+          (unsigned)allocation_create_info.requiredFlags,
+          (unsigned long long)budgets[0].usage,
+          (unsigned long long)budgets[0].budget);
+    }    VK_CHECK(vma_res);
     // Only create the image view if the image has been bound to memory
-    create_image_view();
-  } else {
+    create_image_view();  } else {
     VK_CHECK(vkCreateImage(
         allocator_info.device, &image_create_info, nullptr, &(handles_.image)));
   }

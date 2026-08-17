@@ -14,6 +14,18 @@ static Tensor view_internal(const Tensor& self_arg, const IntArrayRef shape) {
   Tensor self = self_arg.is_vulkan() ? self_arg : self_arg.vulkan();
   vTensor& v_self = convert(self);
 
+  if (std::getenv("VK_TRACE")) {
+    std::string s;
+    for (auto x : shape) s += std::to_string(x) + ",";
+    std::fprintf(
+        stderr, "[view] self=%lld,%lld,%lld,%lld -> %s\n",
+        (long long)(self_arg.dim() > 0 ? self_arg.size(0) : 1),
+        (long long)(self_arg.dim() > 1 ? self_arg.size(1) : 1),
+        (long long)(self_arg.dim() > 2 ? self_arg.size(2) : 1),
+        (long long)(self_arg.dim() > 3 ? self_arg.size(3) : 1),
+        s.c_str());
+  }
+
   at::DimVector inferred_size = at::infer_size_dv(shape, self.numel());
   IntArrayRef output_size(inferred_size);
 
@@ -28,7 +40,8 @@ static Tensor view_internal(const Tensor& self_arg, const IntArrayRef shape) {
     v_output.set_zero_point(v_self.get_zero_point());
   }
 
-  api::StorageBuffer buffer(context, api::kFloat, v_self.gpu_numel(), true);
+  api::StorageBuffer buffer(
+      context, v_self.dtype(), v_self.gpu_numel(), true);
 
   utils::pack_vtensor_to_staging(v_self, buffer.buffer());
 

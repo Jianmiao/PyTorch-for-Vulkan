@@ -70,6 +70,7 @@ class Context final {
   std::mutex cmd_mutex_;
   CommandBuffer cmd_;
   uint32_t submit_count_;
+  uint32_t dispatches_since_flush_{0u};
   // Memory Management
   std::mutex buffer_clearlist_mutex_;
   std::vector<VulkanBuffer> buffers_to_clear_;
@@ -460,6 +461,7 @@ inline bool Context::submit_copy(
 #endif /* USE_VULKAN_GPU_DIAGNOSTICS */
 
   submit_count_++;
+  dispatches_since_flush_++;
   if (fence_handle != VK_NULL_HANDLE ||
       submit_count_ >= config_.cmdSubmitFrequency) {
     submit_cmd_to_gpu(fence_handle);
@@ -542,6 +544,7 @@ inline bool Context::submit_compute_job(
 #endif /* USE_VULKAN_GPU_DIAGNOSTICS */
 
   submit_count_++;
+  dispatches_since_flush_++;
   if (fence_handle != VK_NULL_HANDLE ||
       submit_count_ >= config_.cmdSubmitFrequency) {
     submit_cmd_to_gpu(fence_handle);

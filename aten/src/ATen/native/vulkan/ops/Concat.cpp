@@ -1,6 +1,7 @@
 #include <ATen/native/vulkan/ops/Common.h>
 #include <c10/util/irange.h>
 #include <torch/library.h>
+#include "ssbo/SsboBackend.h"
 
 namespace at {
 namespace native {
@@ -270,6 +271,12 @@ Tensor cat_height(
 }
 
 Tensor cat(const at::ITensorListRef& tensors, const int64_t in_dim) {
+  if (in_dim == 1) {
+    std::vector<Tensor> ts;
+    for (const Tensor& t : tensors) ts.push_back(t);
+    Tensor r = at::native::vulkan::ops::ssbo::cat(ts, in_dim);
+    if (r.defined()) return r;
+  }
   TORCH_CHECK(!tensors.empty(), "Vulkan cat expects at least one tensor");
   auto materialized = tensors.materialize();
   TORCH_INTERNAL_ASSERT(!materialized.empty(), "Accessing empty array");

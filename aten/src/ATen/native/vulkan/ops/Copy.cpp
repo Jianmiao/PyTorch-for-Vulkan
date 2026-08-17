@@ -162,6 +162,14 @@ void pack_cpu_to_vulkan(const Tensor& src, vTensor& dst) {
   // types, so for now storage buffers created for compute shaders must define
   // floats as their base data type.
   api::StorageBuffer staging(context, api::kFloat, dst.gpu_numel());
+  if (std::getenv("VK_TRACE") && dst.gpu_numel() > 1000000) {
+    std::fprintf(
+        stderr,
+        "[staging] numel=%zu bytes=%zu src_dtype=%d\n",
+        (size_t)dst.gpu_numel(),
+        (size_t)(dst.gpu_numel() * 4),
+        (int)src.scalar_type());
+  }
   {
     api::MemoryMap mapping(staging.buffer(), api::MemoryAccessType::WRITE);
 

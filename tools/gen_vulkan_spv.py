@@ -454,6 +454,8 @@ class SPVGenerator:
                     for arg in ["-I", src_dir_path]
                 ]
 
+                if os.path.exists(spv_out_path):
+                    continue
                 print("glslc cmd:", cmd)
                 subprocess.check_call(cmd)
 

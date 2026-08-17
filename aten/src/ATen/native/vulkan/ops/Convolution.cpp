@@ -19,6 +19,7 @@
 #include <ATen/ops/permute.h>
 #include <ATen/ops/quantize_per_tensor.h>
 #include <ATen/ops/zeros.h>
+#include "ssbo/SsboBackend.h"
 #endif
 
 namespace at {
@@ -537,6 +538,18 @@ vTensor pack_weights(
       api::StorageType::TEXTURE_2D,
   };
 
+  if (std::getenv("VK_TRACE")) {
+    std::fprintf(
+        stderr,
+        "[BIGWEIGHT] src=%lldx%lldx%lldx%lld rearr=%lldx%lldx%lld ext=%u,%u,%u\n",
+        (long long)weight_arg.size(0), (long long)weight_arg.size(1),
+        (long long)(weight_arg.dim() > 2 ? weight_arg.size(2) : 1),
+        (long long)(weight_arg.dim() > 3 ? weight_arg.size(3) : 1),
+        (long long)weight_rearranged.size(0), (long long)weight_rearranged.size(1),
+        (long long)weight_rearranged.size(2),
+        v_weight.extents().data[0], v_weight.extents().data[1], v_weight.extents().data[2]);
+  }
+
   pack_cpu_to_vulkan(weight_rearranged, v_weight);
 
   return v_weight;
@@ -772,9 +785,19 @@ Tensor convolution(
     const bool transposed,
     const IntArrayRef output_padding,
     const int64_t groups) {
+  if (!transposed) {
+    Tensor r = at::native::vulkan::ops::ssbo::convolution(input, weight, bias, stride, padding, dilation, groups);
+    if (r.defined()) return r;
+  }
+  const Tensor weight_cpu = weight.is_vulkan() ? weight.to("cpu") : weight;
+  std::optional<Tensor> bias_cpu;
+  if (bias && bias->defined()) {
+    bias_cpu = bias->is_vulkan() ? bias->to("cpu") : bias;
+  }
+
   Conv2dPackedContext conv_context = Conv2dPackedContext(
-      weight,
-      bias,
+      weight_cpu,
+      bias_cpu,
       stride,
       padding,
       dilation,
@@ -1335,7 +1358,10 @@ Conv1dPackedContext::Conv1dPackedContext(
   packed_.reserve(Packed::NumArgs);
   packed_.emplace_back(
       convert(conv1d::pack_weights_using_width_packing(weight.vulkan())));
-  packed_.emplace_back(bias->vulkan());
+  Tensor bias_cpu = bias.has_value() && bias->defined()
+      ? *bias
+      : at::zeros({weight.size(0)}, weight.options());
+  packed_.emplace_back(bias_cpu.vulkan());
   packed_.emplace_back(stride_arg);
   packed_.emplace_back(padding_arg);
   packed_.emplace_back(dilation_arg);
@@ -1383,8 +1409,16 @@ static Tensor convolution1d(
     const IntArrayRef padding,
     const IntArrayRef dilation,
     const int64_t groups) {
+  Tensor r = at::native::vulkan::ops::ssbo::conv1d(input, weight, bias, stride, padding, dilation, groups);
+  if (r.defined()) return r;
+  const Tensor weight_cpu = weight.is_vulkan() ? weight.to("cpu") : weight;
+  std::optional<Tensor> bias_cpu;
+  if (bias && bias->defined()) {
+    bias_cpu = bias->is_vulkan() ? bias->to("cpu") : bias;
+  }
+
   Conv1dPackedContext conv1d_context =
-      Conv1dPackedContext(weight, bias, stride, padding, dilation, groups);
+      Conv1dPackedContext(weight_cpu, bias_cpu, stride, padding, dilation, groups);
 
   return run_conv1d_context(
       input, c10::make_intrusive<Conv1dPackedContext>(conv1d_context));

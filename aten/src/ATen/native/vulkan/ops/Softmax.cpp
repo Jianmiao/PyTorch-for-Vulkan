@@ -1,6 +1,7 @@
 #include <ATen/native/vulkan/ops/Common.h>
 #include <ATen/native/vulkan/ops/Utils.h>
 #include <torch/library.h>
+#include "ssbo/SsboBackend.h"
 
 namespace at {
 namespace native {
@@ -186,6 +187,10 @@ Tensor softmax(
     const at::Tensor& input_arg,
     const int64_t dim,
     const bool half_to_float) {
+  if (!half_to_float) {
+    Tensor r = at::native::vulkan::ops::ssbo::softmax(input_arg, dim);
+    if (r.defined()) return r;
+  }
   return softmax_internal(input_arg, dim, half_to_float);
 }
 
@@ -197,7 +202,7 @@ Tensor log_softmax(
   // float16 precision. These values are represented as 0 in float16 and result
   // in -inf when log is applied. According to Wikipedia:
   // https://en.wikipedia.org/wiki/Half-precision_floating-point_format#Exponent_encoding,
-  // the minimum strictly positive (subnormal) value is 2^−24 ≈ 5.9605 × 10^−8.
+  // the minimum strictly positive (subnormal) value is 2^�?4 �?5.9605 × 10^�?.
   // Therefore, we add 6 x 10^-8 to the output of softmax to avoid the numerical
   // issue.
   float epsilon = 6e-8;

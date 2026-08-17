@@ -7,12 +7,27 @@
 #include <ATen/native/vulkan/api/Types.h>
 #include <ATen/native/vulkan/impl/Packing.h>
 #include <c10/util/irange.h>
+#include <numeric>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include "ssbo/SsboBackend.h"
 
 namespace at {
 namespace native {
 namespace vulkan {
 namespace ops {
 namespace {
+
+static std::atomic<uint64_t> g_mm_op_count{0};
+
+static inline std::string mm_trace_prefix(const char* fn) {
+  if (!getenv("VK_TRACE")) return "";
+  const uint64_t n = g_mm_op_count.fetch_add(1);
+  char buf[256];
+  snprintf(buf, sizeof(buf), "[%llu] %s", (unsigned long long)n, fn);
+  return std::string(buf);
+}
 
 using namespace api::utils;
 using namespace at::native::vulkan::ops;
@@ -769,6 +784,11 @@ Tensor run_baddbmm_context(
   // TODO: Refactor run_baddbmm_context and run_addmm_context into one.
   api::Context* const context = api::context();
 
+  if (getenv("VK_TRACE")) {
+    fprintf(stderr, "%s in=%d dim=%lld\n", mm_trace_prefix("baddbmm_ctx").c_str(),
+        input_arg.is_vulkan(), (long long)input_arg.dim());
+  }
+
   TORCH_CHECK(
       input_arg.dim() == 3,
       "Vulkan Linear not usable! "
@@ -894,6 +914,8 @@ Tensor addmm(
 }
 
 Tensor mm(const Tensor& mat1_arg, const Tensor& mat2_arg) {
+  Tensor r = at::native::vulkan::ops::ssbo::mm(mat1_arg, mat2_arg);
+  if (r.defined()) return r;
   return run_addmm_context(
       mat1_arg,
       1.0f,
@@ -906,6 +928,12 @@ Tensor mm(const Tensor& mat1_arg, const Tensor& mat2_arg) {
 }
 
 Tensor bmm(const Tensor& mat1_arg, const Tensor& mat2_arg) {
+  Tensor r = at::native::vulkan::ops::ssbo::bmm(mat1_arg, mat2_arg);
+  if (r.defined()) return r;
+  if (getenv("VK_TRACE")) {
+    fprintf(stderr, "%s mat1=3D mat2 dim=%lld\n", mm_trace_prefix("bmm").c_str(),
+        (long long)mat2_arg.dim());
+  }
   return run_baddbmm_context(
       mat1_arg,
       1.0f,
@@ -930,11 +958,121 @@ Tensor baddbmm(
 
 #ifdef USE_VULKAN_API
 
+static Tensor matmul_vulkan(const Tensor& mat1, const Tensor& mat2) {
+  Tensor r = at::native::vulkan::ops::ssbo::matmul(mat1, mat2);
+  if (r.defined()) return r;
+  const int64_t d1 = mat1.dim();
+  const int64_t d2 = mat2.dim();
+
+  if (getenv("VK_TRACE")) {
+    fprintf(stderr, "%s d1=%lld d2=%lld\n", mm_trace_prefix("matmul").c_str(),
+        (long long)d1, (long long)d2);
+  }
+
+  if (d1 == 1 && d2 == 1) {
+    return at::mul(mat1.unsqueeze(0), mat2.unsqueeze(1)).sum(-1).squeeze(0);
+  }
+
+  if (d1 == 2 && d2 == 2) {
+    return at::mm(mat1, mat2);
+  }
+
+  const int64_t n = mat1.size(-2);
+  const int64_t k1 = mat1.size(-1);
+  const int64_t k2 = mat2.size(-2);
+  const int64_t m = mat2.size(-1);
+  TORCH_CHECK(
+      k1 == k2,
+      "matmul: size mismatch, mat1 last dim ",
+      k1,
+      " != mat2 second-to-last dim ",
+      k2);
+
+  std::vector<int64_t> b1(mat1.sizes().begin(), mat1.sizes().end() - 2);
+  std::vector<int64_t> b2(mat2.sizes().begin(), mat2.sizes().end() - 2);
+  std::vector<int64_t> batch;
+  const int64_t nb = std::max(b1.size(), b2.size());
+  for (int64_t i = 0; i < nb; ++i) {
+    const int64_t s1 = i < (int64_t)b1.size() ? b1[i] : 1;
+    const int64_t s2 = i < (int64_t)b2.size() ? b2[i] : 1;
+    TORCH_CHECK(
+        s1 == s2 || s1 == 1 || s2 == 1, "matmul: batch dim mismatch");
+    batch.push_back(std::max(s1, s2));
+  }
+  const int64_t B =
+      batch.empty()
+      ? 1
+      : std::accumulate(batch.begin(), batch.end(), 1, std::multiplies<int64_t>());
+
+  Tensor a = mat1;
+  if (a.dim() == 1) {
+    a = a.unsqueeze(0).unsqueeze(0);
+    a = a.expand({B, 1, k1});
+  } else if (a.dim() == 2) {
+    a = a.unsqueeze(0);
+    a = a.expand({B, n, k1});
+  } else {
+    a = a.reshape({B, n, k1});
+  }
+
+  Tensor b = mat2;
+  if (b.dim() == 1) {
+    b = b.unsqueeze(0).unsqueeze(0);
+    b = b.expand({B, k2, 1});
+  } else if (b.dim() == 2) {
+    b = b.unsqueeze(0);
+    b = b.expand({B, k2, m});
+  } else {
+    b = b.reshape({B, k2, m});
+  }
+
+  // Vulkan bmm packs batch*4 into the texture depth axis, which is capped at
+  // maxImageDimension3D (16384 on Intel). Split large batches into chunks so
+  // each bmm stays within the limit.
+  const int64_t kMaxBmmBatch = 4096;
+  Tensor out;
+  if (B <= kMaxBmmBatch) {
+    out = at::bmm(a, b);
+  } else {
+    std::vector<Tensor> chunks;
+    chunks.reserve((B + kMaxBmmBatch - 1) / kMaxBmmBatch);
+    for (int64_t start = 0; start < B; start += kMaxBmmBatch) {
+      const int64_t end = std::min(start + kMaxBmmBatch, B);
+      chunks.push_back(at::bmm(a.narrow(0, start, end - start), b.narrow(0, start, end - start)));
+    }
+    out = at::cat(chunks, 0);
+  }
+  std::vector<int64_t> out_shape = batch;
+  if (mat1.dim() > 1) {
+    out_shape.push_back(n);
+  }
+  if (mat2.dim() > 1) {
+    out_shape.push_back(m);
+  }
+  return out.reshape(out_shape);
+}
+
+static Tensor linear_vulkan(
+    const Tensor& input,
+    const Tensor& weight,
+    const std::optional<Tensor>& bias) {
+  Tensor r = at::native::vulkan::ops::ssbo::linear(input, weight, bias);
+  if (r.defined()) return r;
+  Tensor w = weight.t().contiguous();
+  Tensor out = matmul_vulkan(input, w);
+  if (bias && bias->defined()) {
+    out = at::add(out, bias->reshape({-1}));
+  }
+  return out;
+}
+
 TORCH_LIBRARY_IMPL(aten, Vulkan, m) {
   m.impl(TORCH_SELECTIVE_NAME("aten::addmm"), TORCH_FN(addmm));
   m.impl(TORCH_SELECTIVE_NAME("aten::mm"), TORCH_FN(mm));
   m.impl(TORCH_SELECTIVE_NAME("aten::bmm"), TORCH_FN(bmm));
   m.impl(TORCH_SELECTIVE_NAME("aten::baddbmm"), TORCH_FN(baddbmm));
+  m.impl(TORCH_SELECTIVE_NAME("aten::matmul"), TORCH_FN(matmul_vulkan));
+  m.impl(TORCH_SELECTIVE_NAME("aten::linear"), TORCH_FN(linear_vulkan));
 }
 
 #endif /* USE_VULKAN_API */
