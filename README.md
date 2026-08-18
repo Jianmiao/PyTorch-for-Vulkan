@@ -1,3 +1,50 @@
+## PyTorch for Vulkan: Custom SSBO Backend
+
+This repository is a PyTorch 2.13.0 fork with our custom Vulkan backend for Windows.
+The upstream PyTorch tree is kept as the buildable base; the latest commit adds the
+custom implementation and its operator wiring.
+
+### What We Built
+
+The main compute path uses Vulkan storage buffers (SSBO), rather than the stock
+texture-only path. The backend is implemented in
+`aten/src/ATen/native/vulkan/ops/ssbo/` and is connected to the Vulkan operator
+registrations in `aten/src/ATen/native/vulkan/ops/`.
+
+The current fork includes SSBO paths for matrix multiplication and linear layers,
+2D convolution, softmax, layer normalization, group normalization, unary and binary
+operations, copy, concat, shape handling, and upsample. Unsupported operations can
+fall back to the official Vulkan implementation.
+
+The backend also includes GPU-side weight caching with an LRU limit, FP16 inference
+support, embedded Vulkan shader binaries, and the Windows build helpers in
+`vulkan-build/`.
+
+### Prebuilt Wheel
+
+The repository includes the CPython 3.13 Windows x64 wheel built from this fork:
+
+`wheels/torch-2.13.0a0+gitcf30153-cp313-cp313-win_amd64-SSBO.whl`
+
+Install it with:
+
+```powershell
+python -m pip install wheels/torch-2.13.0a0+gitcf30153-cp313-cp313-win_amd64-SSBO.whl
+```
+
+The wheel is stored with Git LFS. It requires a Vulkan-capable driver; the Vulkan
+SDK is needed for rebuilding, but not for normal wheel use. The wheel is intended
+for the matching CPython 3.13 Windows environment.
+
+### Source Build
+
+See [`vulkan-build/README.md`](vulkan-build/README.md) for the build configuration,
+Python version matrix, Vulkan SDK requirements, and incremental build scripts.
+
+The remainder of this file is the upstream PyTorch documentation.
+
+---
+
 ![PyTorch Logo](https://github.com/pytorch/pytorch/raw/main/docs/source/_static/img/pytorch-logo-dark.png)
 
 --------------------------------------------------------------------------------
