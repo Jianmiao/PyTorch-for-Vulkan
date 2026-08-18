@@ -4,6 +4,13 @@ A Windows-focused PyTorch fork with our custom Vulkan storage-buffer (SSBO)
 backend. Upstream PyTorch 2.13.0 is only the build base; the work in this
 repository is the Vulkan implementation and its integration into PyTorch.
 
+## Why Vulkan
+
+If your GPU supports Vulkan, you can use this PyTorch build on it. The project
+was created to make local AI tools usable on older GPUs that support Vulkan but
+do not support XPU, CUDA, or ROCm, so those workloads do not have to fall back
+to the CPU.
+
 ## What We Built
 
 The main compute path uses Vulkan SSBOs instead of the stock texture-only path.

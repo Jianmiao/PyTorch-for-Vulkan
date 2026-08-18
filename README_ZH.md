@@ -2,6 +2,12 @@
 
 这是面向 Windows 的 PyTorch Vulkan 定制版本。官方 PyTorch 2.13.0 仅作为可编译的基础源码，我们自己的工作集中在 Vulkan SSBO 后端及其算子接入。
 
+## 为什么选择 Vulkan
+
+只要你的 GPU 支持 Vulkan，就可以使用这个 PyTorch 构建版本。这正是我们
+构建它的初衷：让那些支持 Vulkan、但不支持 XPU、CUDA 或 ROCm 的老旧 GPU
+也能脱离 CPU 运行 PyTorch，为本地 AI 工具提供 GPU 推理能力。
+
 ## 自研 Vulkan SSBO 后端
 
 主计算路径使用 Vulkan Storage Buffer（SSBO），不依赖官方纹理后端的大型图像布局限制。核心实现位于：
