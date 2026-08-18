@@ -42,21 +42,21 @@ texture-backed tensors.
 | `aten/src/ATen/native/vulkan/ops/` | Operator integration and fallback selection |
 | `tools/gen_vulkan_spv.py` | Shader compilation and embedding support |
 | `vulkan-build/` | Windows build scripts for CPython 3.10-3.13 |
-| `wheels/` | Prebuilt wheels stored with Git LFS |
 
 ## Prebuilt Wheel
 
-The repository currently includes the CPython 3.13 Windows x64 build:
+The CPython 3.13 Windows x64 build is published as a GitHub Release asset, so
+it can be downloaded directly without cloning the repository or using Git LFS:
 
-`wheels/torch-2.13.0a0+gitcf30153-cp313-cp313-win_amd64-SSBO.whl`
+[`torch-2.13.0a0+gitcf30153-cp313-cp313-win_amd64-SSBO.whl`](https://github.com/Jianmiao/PyTorch-for-Vulkan/releases/download/v2.13.0-vulkan-ssbo-cp313/torch-2.13.0a0+gitcf30153-cp313-cp313-win_amd64-SSBO.whl)
 
-Fetch the LFS object and install it with:
+Install it directly with:
 
 ```powershell
-git lfs install
-git lfs pull
-python -m pip install wheels/torch-2.13.0a0+gitcf30153-cp313-cp313-win_amd64-SSBO.whl
+python -m pip install https://github.com/Jianmiao/PyTorch-for-Vulkan/releases/download/v2.13.0-vulkan-ssbo-cp313/torch-2.13.0a0+gitcf30153-cp313-cp313-win_amd64-SSBO.whl
 ```
+
+SHA-256: `3428B6703D1BDD20F3A363198FE473E2958467AFCCC607365DDB76E95A315988`
 
 The wheel requires a Vulkan-capable Windows driver. The Vulkan SDK is needed
 when rebuilding, but is not required for normal wheel use.
