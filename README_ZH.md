@@ -13,7 +13,7 @@ aten/src/ATen/native/vulkan/ops/ssbo/
 主要特点：
 
 - Vulkan SSBO 计算内核和显式同步。
-- GPU 驻留权重缓存，带 LRU 限制；默认上限 12 GB，可通过 `VKSSBO_WEIGHT_CACHE_MB` 调整。
+- 使用 GPU Storage Buffer 承载张量，适合大型推理 workload，避免纹理尺寸限制。
 - 支持 FP16 权重和激活推理。
 - 内嵌 SPIR-V shader，便于打包后的 wheel 使用。
 - 未覆盖的算子可以回退到官方 Vulkan 实现。
@@ -76,3 +76,8 @@ USE_DISTRIBUTED=0
 ```powershell
 python setup.py bdist_wheel
 ```
+
+## 开源协议
+
+本项目遵循 PyTorch 原版 BSD-style License。仓库保留了未经修改的原始
+`LICENSE` 和 `NOTICE` 文件，以及其中的版权和来源声明。

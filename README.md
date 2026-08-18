@@ -13,8 +13,8 @@ into the Vulkan operator registrations under `aten/src/ATen/native/vulkan/ops/`.
 Key properties:
 
 - GPU storage-buffer kernels with explicit Vulkan synchronization.
-- GPU-resident weight caching with an LRU limit. The default cache limit is
-  12 GB and can be changed with `VKSSBO_WEIGHT_CACHE_MB`.
+- GPU storage-buffer tensors for large inference workloads without texture
+  dimension limits.
 - FP16 inference support for weights and activations where supported.
 - Embedded SPIR-V shader binaries for the packaged build.
 - Official Vulkan fallback for operators that are not yet covered by SSBO.
@@ -87,3 +87,9 @@ python setup.py bdist_wheel
 This fork is based on the upstream [PyTorch](https://github.com/pytorch/pytorch)
 2.13.0 source tree; the custom Vulkan SSBO work above is the purpose of this
 repository.
+
+## License
+
+This project follows the original PyTorch BSD-style license. The original
+`LICENSE` and `NOTICE` files are retained unchanged, including the upstream
+copyright and attribution notices.
