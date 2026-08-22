@@ -1,36 +1,31 @@
-# INT4 Weight-Only Contract Design
+# INT4 仅权重量化格式契约设计
 
-Date: 2026-08-22
+日期：2026-08-22
 
-## Goal
+## 目标
 
-Add a versioned CPU reference contract for weight-only INT4 data so the
-Vulkan SSBO backend can validate, dequantize, and safely fall back to the
-existing FP32 weight path. This phase is a compatibility and format phase;
-it does not enable an INT4 Vulkan feature, storage path, shader, pipeline, or
-performance claim.
+增加一个有版本号的、基于 CPU 参考实现的 INT4 仅权重量化数据契约，
+让 Vulkan SSBO 后端能够验证数据、执行解码，并在任何不支持或不安全的
+情况下回退到现有 FP32 权重路径。本阶段只处理兼容性和格式，不启用
+INT4 Vulkan feature、storage、shader、pipeline，也不产生 INT4 性能结论。
 
-## Scope
+## 范围
 
-The implementation will live beside the existing INT8 contract in
-`tools/vulkan_ssbo/int4_weight_only.py` and will have an independent runtime
-regression in `test_int4_weight_only_contract_runtime.py`. UMA and software
-discrete-policy simulation must run the same test. The normal UMA and
-discrete-simulation entry points will invoke this regression after the INT8
-contract checks.
+实现文件放在现有 INT8 契约旁边：
+`tools/vulkan_ssbo/int4_weight_only.py`；独立回归为
+`test_int4_weight_only_contract_runtime.py`。UMA 和离散策略软件模拟都必须
+运行同一套测试。UMA 入口和离散模拟入口会在 INT8 契约测试之后调用该回归。
 
-The contract has two explicit outcomes:
+该契约只有两种明确结果：
 
-1. `int4_weight_only`: the payload is valid and is decoded to a contiguous
-   FP32 weight for the existing operator path.
-2. `fp32_fallback`: the payload is malformed, unsupported, or has a shape
-   mismatch, so the original weight is returned as contiguous FP32.
+1. `int4_weight_only`：数据有效，解码为连续的 FP32 权重，交给现有算子路径。
+2. `fp32_fallback`：数据损坏、不支持或形状不匹配，返回原始权重的连续 FP32 副本。
 
-No invalid payload may reach a future INT4 dispatch implicitly.
+任何非法 payload 都不能隐式进入未来的 INT4 dispatch。
 
-## Format v1
+## v1 格式
 
-The payload is a frozen dataclass with these fields:
+payload 使用冻结字段的数据类表示：
 
 ```text
 qweight          uint8 tensor [out_features, ceil(in_features / 2)]
@@ -44,84 +39,76 @@ scale_granularity "per_output_channel_block"
 nibble_order     "low_even_high_odd"
 ```
 
-Each stored byte contains two unsigned 4-bit codes. The value for input
-column `2*j` is the low nibble and the value for `2*j+1` is the high nibble.
-The last high nibble is ignored when `in_features` is odd. Codes are in
-`[0, 15]`. For block `b`, the decoded value is:
+每个字节保存两个无符号 4-bit code。输入列 `2*j` 使用低 nibble，输入列
+`2*j+1` 使用高 nibble。当 `in_features` 为奇数时，最后一个高 nibble
+被忽略。code 范围为 `[0, 15]`。对于 block `b`，解码公式为：
 
 ```text
 decoded = (code - zero_point[row, b]) * scale[row, b]
 ```
 
-The packer computes affine min/max parameters per output-channel block. An
-all-zero block uses `scale=1` and `zero_point=0`, preserving an exact zero
-representation. The v1 packer always emits contiguous tensors and does not
-accept a caller-supplied zero point.
+打包器按输出通道的 block 计算 affine min/max 参数。全零 block 使用
+`scale=1`、`zero_point=0`，确保零值可以精确表示。v1 打包器始终生成
+连续 tensor，不接受调用方传入的 zero-point。
 
-## Validation and fallback
+## 验证与回退
 
-Validation rejects, with a stable reason string, any of the following:
+以下情况必须被拒绝，并返回稳定的原因字符串：
 
-- wrong version, scheme, granularity, nibble order, or block size;
-- non-tensor fields, wrong ranks, dtypes, shapes, or non-contiguous storage;
-- `in_features` inconsistent with the original weight or packed byte width;
-- non-finite or non-positive scales;
-- zero points outside `[0, 15]` or with a shape different from `scale`;
-- qweight values outside the uint8/nibble representation.
+- 版本、scheme、granularity、nibble order 或 block size 错误；
+- 字段不是 tensor，或 rank、dtype、shape 错误，或 storage 非连续；
+- `in_features` 与原始权重或打包字节宽度不一致；
+- scale 不是有限值或小于等于零；
+- zero-point 超出 `[0, 15]`，或 shape 与 scale 不一致；
+- qweight 不符合 uint8/nibble 表示范围。
 
-`resolve_weight(original_weight, payload)` returns
-`(weight, mode, reason)`. A valid payload returns a contiguous FP32
-dequantization and `mode="int4_weight_only"`. Every validation failure and
-shape mismatch returns the original weight converted to contiguous FP32 with
-`mode="fp32_fallback"`. The original tensor is never mutated.
+`resolve_weight(original_weight, payload)` 返回 `(weight, mode, reason)`。
+有效 payload 返回连续 FP32 解码结果，并设置
+`mode="int4_weight_only"`。任何验证失败或 shape 不匹配，都返回原始权重
+转换后的连续 FP32，并设置 `mode="fp32_fallback"`。不得修改原始 tensor。
 
-## Numerical gates
+## 数值门槛
 
-The regression uses fixed seeds and representative linear shapes
-`128x256`, `1024x1280`, and `4096x4096`. It records the relative L2 error of
-`F.linear(input, dequantized_weight)` against the original FP32 reference.
-The v1 candidate gate is `< 0.10` relative L2 for every representative shape.
-The test also checks a small SSBO linear call with the dequantized weight and
-requires the existing FP16-storage tolerance (`max_abs < 3e-2`). This is a
-bridge/fallback check, not an INT4 dispatch benchmark.
+回归使用固定随机种子和代表性 Linear shape：
+`128x256`、`1024x1280`、`4096x4096`。记录
+`F.linear(input, dequantized_weight)` 相对于原始 FP32 参考结果的相对 L2
+误差。v1 候选门槛为每个代表性 shape 的相对 L2 均 `< 0.10`。
 
-Invalid payload cases must resolve to FP32 fallback and reproduce the
-original-weight reference within the same existing SSBO tolerance. The test
-must confirm that no resident entries remain after cleanup.
+测试还会用解码后的权重执行一次小型 SSBO Linear，并要求满足现有
+FP16 storage 容差（`max_abs < 3e-2`）。这只是 bridge/fallback 检查，
+不是 INT4 dispatch 性能基准。
 
-## Capability and policy boundaries
+非法 payload 必须解析为 FP32 fallback，并在相同的 SSBO 容差内复现原始
+权重参考结果。测试必须确认清理后没有残留 resident entry。
 
-- `int4_weight_only_enabled` is not added as an enabled runtime capability in
-  this phase; the format module is CPU-only.
-- Existing `shaderInt8` and 8-bit storage fields remain diagnostic only.
-- No INT4 shader compilation probe is required until a kernel design is
-  approved separately.
-- `VKSSBO_SIMULATE_DISCRETE=1` changes only policy/topology behavior. It must
-  not turn INT4 into a GPU dispatch or convert simulated timings into a
-  performance result.
-- INT8, BF16, FP16, native SSBO, torch 14/14, and existing fusion regressions
-  remain mandatory gates.
+## 能力与策略边界
 
-## Failure handling and reporting
+- 本阶段不新增启用态的 `int4_weight_only_enabled` 运行时能力字段；格式模块
+  只运行在 CPU 上。
+- 现有 `shaderInt8` 和 8-bit storage 字段仍然只用于诊断。
+- 在单独的 kernel 设计获批前，不要求 INT4 shader 编译探针。
+- `VKSSBO_SIMULATE_DISCRETE=1` 只改变策略和拓扑行为，不能因此把 INT4
+  变成 GPU dispatch，也不能把模拟耗时当作性能结果。
+- INT8、BF16、FP16、native SSBO、torch 14/14 和现有融合回归仍是强制门槛。
 
-The test runs its Vulkan child in a fresh process, emits one final JSON record,
-and uses the existing controlled Windows termination pattern to avoid native
-Vulkan teardown crashes. The JSON records format metadata, per-shape relative
-L2 errors, SSBO bridge error, fallback reasons, and resident entry count.
-The parent prints `INT4 weight-only format/fallback regression: PASS` only
-when every assertion and the child exit code succeed.
+## 失败处理与报告
 
-## Deliverables
+测试在新进程中运行 Vulkan 子进程，输出一条最终 JSON 记录，并使用现有的
+受控 Windows 终止方式，避免 native Vulkan teardown 崩溃。JSON 记录格式
+元数据、每个 shape 的相对 L2 误差、SSBO bridge 误差、fallback 原因和
+resident entry 数量。只有所有断言和子进程退出码都成功时，父进程才打印
+`INT4 weight-only format/fallback regression: PASS`。
 
-- `int4_weight_only.py` format, pack, validation, and FP32 fallback module.
-- `test_int4_weight_only_contract_runtime.py` contract and bridge regression.
-- UMA and discrete-simulation entry-point integration.
-- A taskbook result entry with exact test status and explicit statement that
-  INT4 Vulkan storage/kernel/performance remain disabled.
+## 交付物
 
-## Non-goals
+- `int4_weight_only.py`：格式、打包、验证和 FP32 fallback 模块；
+- `test_int4_weight_only_contract_runtime.py`：契约和 bridge 回归；
+- UMA 和离散模拟入口集成；
+- 任务书结果记录，明确写出 INT4 Vulkan storage、kernel 和性能路径仍关闭。
 
-- No INT4 Vulkan shader, feature enablement, or pipeline.
-- No INT4 resident storage or async-transfer policy change.
-- No wheel build or external package creation.
-- No performance conclusion from CPU dequantization or discrete simulation.
+## 非目标
+
+- 不实现 INT4 Vulkan shader、feature 启用或 pipeline；
+- 不改变 INT4 resident storage 或异步传输策略；
+- 不构建 wheel，不制作外部整合包；
+- 不根据 CPU 解码或离散模拟得出性能结论。
