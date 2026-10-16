@@ -1,20 +1,52 @@
 # PyTorch for Vulkan
 
-A Windows-focused PyTorch fork with our custom Vulkan storage-buffer (SSBO)
-backend. This project extends upstream PyTorch 2.13.0 with a custom Vulkan
-implementation and integration; it does not reimplement the entire PyTorch
-framework.
+A PyTorch fork developing a Vulkan storage-buffer (SSBO) backend to make
+existing PyTorch applications usable across GPU vendors. Our goal is to give
+users more choice of GPU without tying their applications to one vendor's
+software ecosystem.
+
+This project extends upstream PyTorch 2.13.0. Current development and local
+validation focus on Windows and Intel integrated/UMA hardware; broader hardware
+and operating-system coverage are goals, not established support.
+
+[中文说明](README_ZH.md) | [Roadmap / 路线图](docs/vulkan-roadmap.md)
 
 ## Why Vulkan
 
-The project aims to make local AI tools usable on GPUs with Vulkan support,
-including devices without XPU, CUDA, or ROCm. Vulkan support alone does not
-guarantee that a model or operator is supported; see the current scope below.
+Vulkan offers a common compute API across GPU vendors. We aim to reduce the
+effort needed to run existing PyTorch applications on capable hardware,
+including integrated GPUs, new discrete GPUs and older GPUs. Extending the
+useful life of older hardware is one benefit of this work.
+
+Vulkan support alone does not guarantee that a GPU, model or operator is
+supported. Required device features, driver behavior, tensor semantics and
+the actual execution path must be verified. Native execution, hybrid execution,
+CPU fallback, unsupported cases and unverified cases must be distinguished.
+
+## Project Goals and Priorities
+
+- First, deliver practical single-device inference compatibility: correct
+  tensor/operator behavior, predictable resource lifetimes and visible fallback.
+- Reuse the same backend capabilities across ordinary PyTorch programs and
+  application adapters such as ComfyUI and GPT-SoVITS.
+- Expand the tested GPU-vendor and operating-system matrix incrementally,
+  publishing the scope and evidence for each supported configuration.
+- Keep model placement, unloading, prefetch and advanced attention strategies
+  in application or optional plugin layers. Supported workloads must have a
+  usable default path without requiring those plugins.
+
+Full native training needs its own operator, backward and numerical acceptance.
+Heterogeneous multi-GPU execution is a separate future research direction;
+cross-vendor portability does not imply pooled VRAM or equal performance on
+all GPUs. The project does not require applications to abandon working CUDA,
+XPU or ROCm paths.
 
 ## Current Development Status
 
 The October 2026 source snapshot is experimental compatibility work. It is not
 a new wheel release or a declaration of complete PyTorch Vulkan support.
+The checks below primarily cover local Windows/Intel UMA configurations; they
+do not qualify every Vulkan GPU or other operating systems.
 
 - Small FP32 native-buffer chains and constrained view/copy/stride semantics
   have passed local UMA checks. Full Storage, arbitrary tensor shapes and
@@ -43,9 +75,14 @@ Key properties:
 - GPU storage-buffer kernels with explicit Vulkan synchronization.
 - GPU storage-buffer tensors for large inference workloads without texture
   dimension limits.
-- FP16 inference support for weights and activations where supported.
+- FP16 weights and activations in supported SSBO inference paths; this is not
+  a claim of general FP16 native-tensor coverage.
 - Embedded SPIR-V shader binaries for the packaged build.
-- Official Vulkan fallback for operators that are not yet covered by SSBO.
+- Fallback to the stock Vulkan implementation where a compatible registered
+  path exists; unsupported cases still need explicit handling.
+
+Removing texture-layout constraints does not remove device memory limits or
+the bounds of the current native-tensor implementation.
 
 ## Languages and Tooling
 
@@ -71,7 +108,8 @@ compiled shader format, not an additional source language.
 
 ## Operator Coverage
 
-The current SSBO path covers the core operators used by our ComfyUI workload:
+The SSBO implementation includes paths for these operator families used by our
+ComfyUI workload:
 
 - `linear`, `matmul`, and batched matrix multiplication
 - 2D convolution
@@ -83,6 +121,10 @@ The current SSBO path covers the core operators used by our ComfyUI workload:
 The implementation is designed for GPU-heavy inference chains, keeping Vulkan
 weights cached and avoiding the stock image-layout limits that affect large
 texture-backed tensors.
+
+This list describes implementation areas, not support for every shape, dtype,
+layout or gradient combination. It also does not establish that an arbitrary
+PyTorch program runs entirely on Vulkan; consult the verified scope above.
 
 ## Source Layout
 
@@ -102,6 +144,10 @@ utilities are maintained in the separate ComfyUI workspace; that directory is
 not part of this PyTorch source checkout.
 
 ## Prebuilt Wheel
+
+This is an older Windows artifact. It does not contain all changes or
+verification described in the October 2026 source snapshot, and should not be
+used to infer the support status of the current development source.
 
 The CPython 3.13 Windows x64 build is published as a GitHub Release asset, so
 it can be downloaded directly without cloning the repository or using Git LFS:
