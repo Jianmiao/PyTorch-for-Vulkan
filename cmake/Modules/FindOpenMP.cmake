@@ -267,12 +267,15 @@ function(_OPENMP_GET_FLAGS LANG FLAG_MODE OPENMP_FLAG_VAR OPENMP_LIB_NAMES_VAR)
       set(OpenMP_libomp_LIBRARY "${MKL_OPENMP_LIBRARY}" CACHE STRING "libomp location for OpenMP")
     endif()
 
-    if ((NOT OpenMP_libomp_LIBRARY) AND MSVC AND CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
-      # On MSVC ARM64, OpenMP is provided by vcomp, which is a part of the Visual Studio installation.
+    if ((NOT OpenMP_libomp_LIBRARY) AND CMAKE_${LANG}_COMPILER_ID STREQUAL "MSVC"
+        AND OPENMP_FLAGS_TEST MATCHES "[-/]openmp(:experimental)?( |$)")
+      # cl /openmp[:experimental] emits _vcomp_* calls on x64 as well as
+      # ARM64. LLVM's libomp only supplies the omp_* queries, so selecting
+      # it here mixes two teams and makes every VCOMP worker report tid=0.
       find_library(OpenMP_libomp_LIBRARY
       NAMES vcomp
       HINTS ${CMAKE_${LANG}_IMPLICIT_LINK_DIRECTORIES}
-      DOC "vcomp location for OpenMP on MSVC ARM64"
+      DOC "vcomp location for MSVC OpenMP"
       )
       mark_as_advanced(OpenMP_libomp_LIBRARY)
     endif()
@@ -556,6 +559,26 @@ foreach(LANG IN ITEMS C CXX)
     set(OpenMP_${LANG}_LIB_NAMES "${OpenMP_${LANG}_LIB_NAMES_WORK}"
       CACHE STRING "${LANG} compiler libraries for OpenMP parallelization")
     mark_as_advanced(OpenMP_${LANG}_FLAGS OpenMP_${LANG}_LIB_NAMES)
+
+    # Also repair an existing cache produced by the older x64 detection.
+    # Preserve Intel's compatible runtime and explicit /openmp:llvm builds.
+    if(CMAKE_${LANG}_COMPILER_ID STREQUAL "MSVC"
+        AND OpenMP_${LANG}_FLAGS MATCHES "[-/]openmp(:experimental)?( |$)"
+        AND OpenMP_${LANG}_LIB_NAMES STREQUAL "libomp")
+      get_filename_component(_OpenMP_runtime_name "${OpenMP_libomp_LIBRARY}" NAME)
+      if(_OpenMP_runtime_name MATCHES "^(lib)?omp\\.lib$")
+        find_library(OpenMP_vcomp_LIBRARY NAMES vcomp
+          HINTS ${CMAKE_${LANG}_IMPLICIT_LINK_DIRECTORIES}
+          DOC "vcomp location for MSVC OpenMP")
+        if(NOT OpenMP_vcomp_LIBRARY)
+          message(FATAL_ERROR "MSVC ${OpenMP_${LANG}_FLAGS} requires vcomp.lib; libomp.lib uses a different runtime")
+        endif()
+        set(OpenMP_${LANG}_LIB_NAMES "vcomp" CACHE STRING
+          "${LANG} compiler libraries for OpenMP parallelization" FORCE)
+        mark_as_advanced(OpenMP_vcomp_LIBRARY)
+      endif()
+      unset(_OpenMP_runtime_name)
+    endif()
   endif()
 endforeach()
 

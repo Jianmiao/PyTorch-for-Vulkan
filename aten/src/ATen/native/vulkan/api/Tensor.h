@@ -125,6 +125,14 @@ class vTensor final {
   vTensor(vTensor&& other) = default;
   vTensor& operator=(vTensor&& other) = default;
 
+  // Share the entire contiguous FP32 buffer, with independent shape metadata.
+  vTensor buffer_view(const std::vector<int64_t>& sizes) const;
+  vTensor buffer_strided_view(const std::vector<int64_t>& sizes,
+                             const std::vector<int64_t>& strides,
+                             int64_t offset) const;
+  int64_t storage_offset() const { return storage_offset_; }
+  bool buffer_is_contiguous() const;
+
   // Used for passing buffer sizes and strides data to shaders
   struct BufferMetadata {
     api::utils::uvec4 sizes;
@@ -143,6 +151,7 @@ class vTensor final {
   // Sizes and Strides
   std::vector<int64_t> sizes_;
   std::vector<int64_t> strides_;
+  int64_t storage_offset_{0};
 
   // Storage Dimensions. When stored on the GPU, one dimension will be aligned
   // to the next multiple of 4 in order to take advantage of vec4 data types.
@@ -206,6 +215,8 @@ class vTensor final {
   }
 
   inline api::VulkanImage& image() const& {
+    VK_CHECK_COND(storage_type() != api::StorageType::BUFFER,
+                  "Vulkan buffer tensor cannot be used by a texture-only operator");
     return view_->image_;
   }
 

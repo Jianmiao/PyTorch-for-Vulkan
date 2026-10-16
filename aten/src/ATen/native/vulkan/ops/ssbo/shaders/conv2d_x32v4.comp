@@ -1,0 +1,132 @@
+#version 450 core
+// Fast 3x3 Conv2D path: 16x16 pixels x 32 output channels per workgroup.
+// Four adjacent output-channel weights share one f16vec4 load, reducing
+// shared-memory load instructions while retaining 32 independent fp32 sums.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer X { float16_t x[]; };
+layout(std430, binding = 1) readonly buffer W { float16_t w[]; };
+layout(std430, binding = 2) readonly buffer Bias { float16_t bias[]; };
+#ifdef F32_OUT
+layout(std430, binding = 3) writeonly buffer Y { float y[]; };
+#else
+layout(std430, binding = 3) writeonly buffer Y { float16_t y[]; };
+#endif
+
+layout(push_constant) uniform Params {
+  int B, C, O, H, W, Ho, Wo, KH, KW, SH, SW, PH, PW, G;
+} p;
+
+shared float16_t xs[18][18][16];
+shared f16vec4 ws4[8][16][9];
+
+void main() {
+  uint px = gl_LocalInvocationID.x;
+  uint py = gl_LocalInvocationID.y;
+  uint gx = gl_GlobalInvocationID.x;
+  uint gy = gl_GlobalInvocationID.y;
+  uint gx_tile = gl_WorkGroupID.x * 16u;
+  uint gy_tile = gl_WorkGroupID.y * 16u;
+  uint z = gl_WorkGroupID.z;
+
+  uint otiles = (uint(p.O) + 31u) / 32u;
+  uint batch = z / otiles;
+  uint out0 = (z % otiles) * 32u;
+  uint x_base = batch * uint(p.C * p.H * p.W);
+
+  float acc[32];
+  for (uint q = 0u; q < 32u; ++q) acc[q] = 0.0;
+
+  uint cchunks = (uint(p.C) + 15u) / 16u;
+  for (uint cc = 0u; cc < cchunks; ++cc) {
+    uint tile_count = 18u * 18u * 16u;
+    for (uint idx = gl_LocalInvocationIndex; idx < tile_count; idx += 256u) {
+      uint ch = idx % 16u;
+      uint rem = idx / 16u;
+      uint wx = rem % 18u;
+      uint wy = rem / 18u;
+      uint ic = cc * 16u + ch;
+      int ih = int(gy_tile) + int(wy) - p.PH;
+      int iw = int(gx_tile) + int(wx) - p.PW;
+      float16_t value = float16_t(0.0);
+      if (ic < uint(p.C) && ih >= 0 && ih < p.H && iw >= 0 && iw < p.W) {
+        value = x[x_base + ic * uint(p.H * p.W) + uint(ih) * uint(p.W) + uint(iw)];
+      }
+      xs[wy][wx][ch] = value;
+    }
+
+    uint weight_count = 8u * 16u * 9u;
+    for (uint idx = gl_LocalInvocationIndex; idx < weight_count; idx += 256u) {
+      uint kw = idx % 3u;
+      uint rem = idx / 3u;
+      uint kh = rem % 3u;
+      rem /= 3u;
+      uint ch = rem % 16u;
+      uint wp = rem / 16u;
+      uint oo = out0 + wp * 4u;
+      uint ic = cc * 16u + ch;
+      f16vec4 value = f16vec4(0.0, 0.0, 0.0, 0.0);
+      if (ic < uint(p.C) && oo < uint(p.O)) {
+        uint weight_stride = uint(p.C * 9u);
+        uint offset = oo * weight_stride + ic * 9u + kh * 3u + kw;
+        value.x = w[offset];
+        if (oo + 1u < uint(p.O)) value.y = w[offset + weight_stride];
+        if (oo + 2u < uint(p.O)) value.z = w[offset + 2u * weight_stride];
+        if (oo + 3u < uint(p.O)) value.w = w[offset + 3u * weight_stride];
+      }
+      ws4[wp][ch][kh * 3u + kw] = value;
+    }
+    barrier();
+
+    for (uint ch = 0u; ch < 16u; ++ch) {
+      for (uint kh = 0u; kh < uint(p.KH); ++kh) {
+        for (uint kw = 0u; kw < uint(p.KW); ++kw) {
+          float a = float(xs[py + kh][px + kw][ch]);
+          uint tap = kh * uint(p.KW) + kw;
+          for (uint block = 0u; block < 2u; ++block) {
+            uint wp = block * 4u;
+            uint q = block * 16u;
+            f16vec4 w0 = ws4[wp + 0u][ch][tap];
+            f16vec4 w1 = ws4[wp + 1u][ch][tap];
+            f16vec4 w2 = ws4[wp + 2u][ch][tap];
+            f16vec4 w3 = ws4[wp + 3u][ch][tap];
+            acc[q + 0u] += a * float(w0.x);
+            acc[q + 1u] += a * float(w0.y);
+            acc[q + 2u] += a * float(w0.z);
+            acc[q + 3u] += a * float(w0.w);
+            acc[q + 4u] += a * float(w1.x);
+            acc[q + 5u] += a * float(w1.y);
+            acc[q + 6u] += a * float(w1.z);
+            acc[q + 7u] += a * float(w1.w);
+            acc[q + 8u] += a * float(w2.x);
+            acc[q + 9u] += a * float(w2.y);
+            acc[q + 10u] += a * float(w2.z);
+            acc[q + 11u] += a * float(w2.w);
+            acc[q + 12u] += a * float(w3.x);
+            acc[q + 13u] += a * float(w3.y);
+            acc[q + 14u] += a * float(w3.z);
+            acc[q + 15u] += a * float(w3.w);
+          }
+        }
+      }
+    }
+    barrier();
+  }
+
+  if (gx < uint(p.Wo) && gy < uint(p.Ho)) {
+    uint y_base = batch * uint(p.O * p.Ho * p.Wo);
+    for (uint q = 0u; q < 32u; ++q) {
+      uint oo = out0 + q;
+      if (oo < uint(p.O)) {
+        float value = acc[q] + float(bias[oo]);
+#ifdef F32_OUT
+        y[y_base + oo * uint(p.Ho * p.Wo) + gy * uint(p.Wo) + gx] = value;
+#else
+        y[y_base + oo * uint(p.Ho * p.Wo) + gy * uint(p.Wo) + gx] = float16_t(value);
+#endif
+      }
+    }
+  }
+}

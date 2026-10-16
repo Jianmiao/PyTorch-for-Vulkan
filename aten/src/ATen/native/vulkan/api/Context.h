@@ -305,6 +305,8 @@ bool available();
 // The global runtime is retrieved using this function, where it is declared as
 // a static local variable.
 Context* context();
+// Finalization only: all callers and Vulkan tensors must have been released.
+void shutdown_context();
 
 namespace detail {
 

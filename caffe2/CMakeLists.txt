@@ -800,6 +800,19 @@ endif()
 
 if(NOT BUILD_LIBTORCHLESS)
 add_library(torch_cpu ${Caffe2_CPU_SRCS})
+
+if(USE_VULKAN AND TARGET vkssbo_memory_policy)
+  # These source-local settings must be applied in the directory that creates
+  # torch_cpu; applying them in aten/src/ATen does not survive the parent
+  # source-list handoff on all CMake generators.
+  set_source_files_properties(
+    "${PROJECT_SOURCE_DIR}/aten/src/ATen/native/vulkan/ops/ssbo/api.cpp"
+    "${PROJECT_SOURCE_DIR}/aten/src/ATen/native/vulkan/ops/ssbo/SsboBackend.cpp"
+    PROPERTIES
+      COMPILE_DEFINITIONS VKSSBO_USE_RUST_MEMORY_POLICY
+      INCLUDE_DIRECTORIES
+        "${PROJECT_SOURCE_DIR}/aten/src/ATen/native/vulkan/ops/ssbo/memory_policy/include")
+endif()
 if(HAVE_SOVERSION)
   set_target_properties(torch_cpu PROPERTIES
       VERSION ${TORCH_VERSION} SOVERSION ${TORCH_SOVERSION})

@@ -1,0 +1,64 @@
+#version 450 core
+
+// Generic rank-5 SSBO convolution.  Inputs and weights use fp16 storage;
+// accumulation stays fp32 for stable training/inference numerics.
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer X { float16_t x[]; };
+layout(std430, binding = 1) readonly buffer W { float16_t w[]; };
+layout(std430, binding = 2) readonly buffer Bias { float16_t bias[]; };
+layout(std430, binding = 3) writeonly buffer Y { float16_t y[]; };
+
+layout(push_constant) uniform Params {
+  int B, C, O, D, H, W, Do, Ho, Wo, KD, KH, KW;
+  int SD, SH, SW, PD, PH, PW, DD, DH, DW, G;
+} p;
+
+void main() {
+  uint wx = gl_GlobalInvocationID.x;
+  uint wy = gl_GlobalInvocationID.y;
+  uint z = gl_GlobalInvocationID.z;
+  uint d = wy / uint(p.Ho);
+  uint h = wy % uint(p.Ho);
+  if (wx >= uint(p.Wo) || d >= uint(p.Do) || h >= uint(p.Ho) ||
+      z >= uint(p.B * p.O)) {
+    return;
+  }
+
+  uint b = z / uint(p.O);
+  uint o = z % uint(p.O);
+  uint cpg = uint(p.C) / uint(p.G);
+  uint og = o / (uint(p.O) / uint(p.G));
+  uint x_base = b * uint(p.C * p.D * p.H * p.W);
+  uint w_base = o * uint(cpg * p.KD * p.KH * p.KW);
+  float acc = 0.0;
+
+  for (uint i = 0; i < cpg; ++i) {
+    uint ic = og * cpg + i;
+    for (uint kd = 0; kd < uint(p.KD); ++kd) {
+      int d_in = int(d) * p.SD + int(kd) * p.DD - p.PD;
+      if (d_in < 0 || d_in >= p.D) continue;
+      for (uint kh = 0; kh < uint(p.KH); ++kh) {
+        int h_in = int(h) * p.SH + int(kh) * p.DH - p.PH;
+        if (h_in < 0 || h_in >= p.H) continue;
+        for (uint kw = 0; kw < uint(p.KW); ++kw) {
+          int w_in = int(wx) * p.SW + int(kw) * p.DW - p.PW;
+          if (w_in < 0 || w_in >= p.W) continue;
+          uint x_idx = x_base +
+              (ic * uint(p.D) + uint(d_in)) * uint(p.H * p.W) +
+              uint(h_in) * uint(p.W) + uint(w_in);
+          uint w_idx = w_base + i * uint(p.KD * p.KH * p.KW) +
+              kd * uint(p.KH * p.KW) + kh * uint(p.KW) + kw;
+          acc += float(x[x_idx]) * float(w[w_idx]);
+        }
+      }
+    }
+  }
+
+  uint y_base = b * uint(p.O * p.Do * p.Ho * p.Wo) +
+      o * uint(p.Do * p.Ho * p.Wo);
+  y[y_base + d * uint(p.Ho * p.Wo) + h * uint(p.Wo) + wx] =
+      float16_t(acc + float(bias[o]));
+}

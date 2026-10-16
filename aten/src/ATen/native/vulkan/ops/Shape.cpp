@@ -1,6 +1,7 @@
 #include <ATen/InferSize.h>
 #include <ATen/native/vulkan/ops/Common.h>
 #include <ATen/native/vulkan/ops/Utils.h>
+#include <ATen/native/vulkan/ops/NativeBuffer.h>
 #include <torch/library.h>
 
 namespace at {
@@ -13,6 +14,13 @@ static Tensor view_internal(const Tensor& self_arg, const IntArrayRef shape) {
 
   Tensor self = self_arg.is_vulkan() ? self_arg : self_arg.vulkan();
   vTensor& v_self = convert(self);
+  if (is_native_buffer(self)) {
+    TORCH_CHECK(!self.requires_grad(), "Vulkan native buffer view supports inference only");
+    const auto inferred_size = at::infer_size_dv(shape, self.numel());
+    return convert(v_self.buffer_view(IntArrayRef(inferred_size).vec()));
+  }
+  TORCH_CHECK(v_self.storage_type() != api::StorageType::BUFFER,
+              "Vulkan native buffer view/alias is not implemented yet");
 
   if (std::getenv("VK_TRACE")) {
     std::string s;
@@ -65,17 +73,73 @@ inline Tensor view(const Tensor& self_arg, IntArrayRef shape) {
   return view_internal(self_arg, shape);
 }
 
+static Tensor squeeze_dim(const Tensor& self, int64_t dim) {
+  const int64_t ndim = self.dim();
+  dim = c10::maybe_wrap_dim(dim, ndim);
+  if (is_native_buffer(self)) {
+    TORCH_CHECK(!self.requires_grad(), "Vulkan native squeeze supports inference only");
+    auto sizes = self.sizes().vec();
+    auto strides = self.strides().vec();
+    if (sizes[dim] == 1) {
+      sizes.erase(sizes.begin() + dim);
+      strides.erase(strides.begin() + dim);
+    }
+    return convert(convert(self).buffer_strided_view(sizes, strides, self.storage_offset()));
+  }
+  if (self.size(dim) != 1) {
+    return is_native_buffer(self) ? view_internal(self, self.sizes()) : self;
+  }
+  std::vector<int64_t> output_size(self.sizes().begin(), self.sizes().end());
+  output_size.erase(output_size.begin() + dim);
+  return view_internal(self, output_size);
+}
+
+static Tensor squeeze(const Tensor& self) {
+  if (is_native_buffer(self)) {
+    TORCH_CHECK(!self.requires_grad(), "Vulkan native squeeze supports inference only");
+    std::vector<int64_t> sizes, strides;
+    for (int64_t i = 0; i < self.dim(); ++i) {
+      if (self.size(i) != 1) {
+        sizes.push_back(self.size(i)); strides.push_back(self.stride(i));
+      }
+    }
+    return convert(convert(self).buffer_strided_view(sizes, strides, self.storage_offset()));
+  }
+  std::vector<int64_t> output_size;
+  output_size.reserve(self.dim());
+  for (const int64_t size : self.sizes()) {
+    if (size != 1) output_size.push_back(size);
+  }
+  return view_internal(self, output_size);
+}
+
 static Tensor _reshape_alias(
     const Tensor& self_arg,
     const IntArrayRef shape,
     const IntArrayRef strides) {
+  if (is_native_buffer(self_arg)) {
+    TORCH_CHECK(shape.size() == strides.size(), "Vulkan reshape_alias sizes/strides mismatch");
+    const auto output = view_internal(self_arg, shape);
+    TORCH_CHECK(output.strides() == strides,
+                "Vulkan reshape_alias only supports canonical contiguous strides");
+    return output;
+  }
   return view_internal(self_arg, shape);
+}
+
+static Tensor alias(const Tensor& self) {
+  TORCH_CHECK(is_native_buffer(self), "Vulkan alias currently requires native buffer mode");
+  TORCH_CHECK(!self.requires_grad(), "Vulkan native alias supports inference only");
+  return convert(convert(self).buffer_strided_view(self.sizes().vec(), self.strides().vec(), self.storage_offset()));
 }
 
 #ifdef USE_VULKAN_API
 
 TORCH_LIBRARY_IMPL(aten, Vulkan, m) {
+  m.impl(TORCH_SELECTIVE_NAME("aten::alias"), TORCH_FN(alias));
   m.impl(TORCH_SELECTIVE_NAME("aten::view"), TORCH_FN(view));
+  m.impl(TORCH_SELECTIVE_NAME("aten::squeeze"), TORCH_FN(squeeze));
+  m.impl(TORCH_SELECTIVE_NAME("aten::squeeze.dim"), TORCH_FN(squeeze_dim));
   m.impl(
       TORCH_SELECTIVE_NAME("aten::_reshape_alias"), TORCH_FN(_reshape_alias));
 }

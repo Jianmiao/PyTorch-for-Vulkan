@@ -12,7 +12,17 @@ rem different UMA Vulkan name.
 rem ============================================================================
 
 set "ROOT=%~dp0"
-set "LOG=%ROOT%uma_test.log"
+set "FINAL_LOG=%ROOT%uma_test.log"
+set "RUN_TOKEN=%RANDOM%-%RANDOM%"
+set "LOG=%ROOT%uma_test.%RUN_TOKEN%.running.log"
+set "RUN_LOCK=%ROOT%.run_uma_test.lock"
+2>nul mkdir "%RUN_LOCK%"
+if errorlevel 1 (
+    echo ERROR: another UMA compatibility/performance test is already running.
+    echo Lock: %RUN_LOCK%
+    exit /b 2
+)
+set "RUN_LOCK_HELD=1"
 
 if not defined VKSSBO_PYTHON (
     if exist "%ROOT%..\..\vk-test-env\Scripts\python.exe" (
@@ -102,11 +112,22 @@ call :run_required "device selection" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test
 call :run_required "async capabilities" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_async_transfer_capabilities_runtime.py"
 set "VKSSBO_TRACE_SUBMIT=1"
 call :run_required "fence submit" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_fence_submit_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_scheduler_lifecycle_torch_runtime.py" call :run_required "PyTorch scheduler lifecycle" "%VKSSBO_TORCH_PYTHON%" "%VKSSBO_TEST_ROOT%\test_scheduler_lifecycle_torch_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_matmul_softmax_fallback_trace_runtime.py" call :run_required "MatMul Softmax fallback trace" "%VKSSBO_TORCH_PYTHON%" "%VKSSBO_TEST_ROOT%\test_matmul_softmax_fallback_trace_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_scheduler_lifecycle_runtime.py" call :run_required "standalone scheduler lifecycle" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_scheduler_lifecycle_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_profile_route_contract.py" call :run_required "ComfyUI profile route contract" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_profile_route_contract.py"
+if exist "%VKSSBO_TEST_ROOT%\test_vulkan_ssbo_bridge_runtime.py" call :run_required "SSBO stock-Vulkan bridge contract" "%VKSSBO_TORCH_PYTHON%" "%VKSSBO_TEST_ROOT%\test_vulkan_ssbo_bridge_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_vulkan_ssbo_bridge_benchmark.py" call :run_required "SSBO stock-Vulkan bridge benchmark" "%VKSSBO_TORCH_PYTHON%" "%VKSSBO_TEST_ROOT%\test_vulkan_ssbo_bridge_benchmark.py"
+if exist "%VKSSBO_TEST_ROOT%\test_standalone_device_info_runtime.py" call :run_required "standalone device info contract" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_standalone_device_info_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_operator_profile_contract.py" call :run_required "standalone operator profile contract" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_operator_profile_contract.py"
 set "VKSSBO_TRACE_SUBMIT=0"
-call :run_required "native SSBO regression" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_vulkan_ssbo_native_runtime.py"
+ call :run_required "native SSBO regression" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_vulkan_ssbo_native_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_attention_score_precision_runtime.py" call :run_required "attention score precision" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_attention_score_precision_runtime.py"
 call :run_required "14-test torch regression" "%VKSSBO_TORCH_PYTHON%" "%VKSSBO_TEST_ROOT%\test_torch.py"
 if exist "%VKSSBO_TEST_ROOT%\test_fp16_resident_runtime.py" call :run_required "FP16 resident compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_fp16_resident_runtime.py"
 if exist "%VKSSBO_TEST_ROOT%\test_fp16_boundaries_runtime.py" call :run_required "FP16 boundary compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_fp16_boundaries_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_fp32_boundaries_runtime.py" call :run_required "FP32 resident boundary compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_fp32_boundaries_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_fp32_conv2d_runtime.py" call :run_required "FP32 resident Conv2D compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_fp32_conv2d_runtime.py"
 if exist "%VKSSBO_TEST_ROOT%\test_bf16_fallback_runtime.py" call :run_required "BF16 fallback compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_bf16_fallback_runtime.py"
 if exist "%VKSSBO_TEST_ROOT%\test_int8_capability_runtime.py" call :run_required "INT8 shader capability" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_int8_capability_runtime.py"
 if exist "%VKSSBO_TEST_ROOT%\test_int8_storage_probe_runtime.py" call :run_required "INT8 SSBO shader probe" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_int8_storage_probe_runtime.py"
@@ -121,6 +142,46 @@ set "VKSSBO_TRANSIENT_POOL=1"
 if exist "%VKSSBO_TEST_ROOT%\test_transient_pool.py" call :run_required "transient pool" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_transient_pool.py"
 set "VKSSBO_TRANSIENT_POOL="
 if exist "%VKSSBO_TEST_ROOT%\test_resident.py" call :run_required "resident regression" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_linear_runtime.py" call :run_required "resident linear compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_linear_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_graph_linear_runtime.py" call :run_required "resident graph linear compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_graph_linear_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_comfy_resident_mlp_graph_runtime.py" call :run_required "ComfyUI resident MLP graph" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_comfy_resident_mlp_graph_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_graph_geglu_runtime.py" call :run_required "resident graph GEGLU compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_graph_geglu_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_comfy_resident_geglu_graph_runtime.py" call :run_required "ComfyUI resident GEGLU graph" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_comfy_resident_geglu_graph_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_graph_layernorm_runtime.py" call :run_required "resident graph LayerNorm compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_graph_layernorm_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_comfy_resident_layernorm_graph_runtime.py" call :run_required "ComfyUI resident LayerNorm graph" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_comfy_resident_layernorm_graph_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_graph_groupnorm_runtime.py" call :run_required "resident graph GroupNorm compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_graph_groupnorm_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_comfy_resident_groupnorm_graph_runtime.py" call :run_required "ComfyUI resident GroupNorm graph" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_comfy_resident_groupnorm_graph_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_graph_conv2d_runtime.py" call :run_required "resident graph Conv2D compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_graph_conv2d_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_graph_channelwise_add_runtime.py" call :run_required "resident graph channelwise add compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_graph_channelwise_add_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_graph_upsample_runtime.py" call :run_required "resident graph upsample compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_graph_upsample_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_4x_superres_runtime.py" call :run_required "resident 4x super-resolution chain" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_4x_superres_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_rrdbnet_4x_e2e_runtime.py" call :run_required "RRDBNet 4x end-to-end compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_rrdbnet_4x_e2e_runtime.py" --skip-real
+if exist "%VKSSBO_TEST_ROOT%\test_comfy_resident_conv2d_graph_runtime.py" call :run_required "ComfyUI resident Conv2D graph" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_comfy_resident_conv2d_graph_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_graph_conv1d_runtime.py" call :run_required "resident graph Conv1D compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_graph_conv1d_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_comfy_resident_conv1d_runtime.py" call :run_required "ComfyUI resident Conv1D routing" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_comfy_resident_conv1d_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_graph_conv_transpose1d_runtime.py" call :run_required "resident graph ConvTranspose1D compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_graph_conv_transpose1d_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_comfy_resident_conv_transpose1d_runtime.py" call :run_required "ComfyUI resident ConvTranspose1D routing" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_comfy_resident_conv_transpose1d_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_graph_conv1d_activation_runtime.py" call :run_required "resident graph Conv1D activation compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_graph_conv1d_activation_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_comfy_resident_conv1d_activation_runtime.py" call :run_required "ComfyUI audio Conv1D activation routing" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_comfy_resident_conv1d_activation_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_graph_audio_norm_conv1d_runtime.py" call :run_required "resident audio Conv1D normalization graph" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_graph_audio_norm_conv1d_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_comfy_resident_audio_norm_conv1d_runtime.py" call :run_required "ComfyUI audio normalization Conv1D routing" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_comfy_resident_audio_norm_conv1d_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_graph_glu_runtime.py" call :run_required "resident graph GLU compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_graph_glu_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_graph_chunk_mul_runtime.py" call :run_required "resident graph chunk/mul compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_graph_chunk_mul_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_graph_audio_transformer_runtime.py" call :run_required "resident audio Transformer graph compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_graph_audio_transformer_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_comfy_resident_audio_transformer_runtime.py" call :run_required "ComfyUI audio Transformer routing" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_comfy_resident_audio_transformer_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_audio_encoder_mini_e2e_runtime.py" call :run_required "mini Wav2Vec2 resident encoder smoke" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_audio_encoder_mini_e2e_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_comfy_resident_audio_glu_runtime.py" call :run_required "ComfyUI audio GLU routing" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_comfy_resident_audio_glu_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_comfy_resident_glu_gate_runtime.py" call :run_required "ComfyUI functional GLU gate routing" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_comfy_resident_glu_gate_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_graph_snake_beta_runtime.py" call :run_required "resident graph SnakeBeta compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_graph_snake_beta_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_comfy_resident_conv3d_runtime.py" call :run_required "ComfyUI resident Conv3D routing" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_comfy_resident_conv3d_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_comfy_resident_resblock_graph_runtime.py" call :run_required "ComfyUI resident full ResBlock graph" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_comfy_resident_resblock_graph_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_comfy_resident_resblock_scale_shift_runtime.py" call :run_required "ComfyUI resident scale-shift ResBlock graph" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_comfy_resident_resblock_scale_shift_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_comfy_resident_resblock_updown_runtime.py" call :run_required "ComfyUI resident up/down ResBlock graph" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_comfy_resident_resblock_updown_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_comfy_resident_video_resblock_runtime.py" call :run_required "ComfyUI resident VideoResBlock graph" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_comfy_resident_video_resblock_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_comfy_resident_lora_runtime.py" call :run_required "ComfyUI resident standard LoRA graph" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_comfy_resident_lora_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_async_runtime.py" call :run_required "resident async graph compatibility" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_async_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_async_pipeline_runtime.py" call :run_required "resident async multi-graph pipeline" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_async_pipeline_runtime.py"
+if exist "%VKSSBO_TEST_ROOT%\test_resident_host_read_boundary_runtime.py" call :run_required "resident host-read boundary" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_resident_host_read_boundary_runtime.py"
 if exist "%VKSSBO_TEST_ROOT%\test_matmul_autotune_runtime.py" call :run_required "matmul autotune" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_matmul_autotune_runtime.py"
 if exist "%VKSSBO_TEST_ROOT%\test_matmul_autotune_focused_runtime.py" call :run_required "matmul autotune focused" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_matmul_autotune_focused_runtime.py"
 if exist "%VKSSBO_TEST_ROOT%\test_matmul_autotune_concurrent_runtime.py" call :run_required "matmul autotune concurrent" "%VKSSBO_PYTHON%" "%VKSSBO_TEST_ROOT%\test_matmul_autotune_concurrent_runtime.py"
@@ -142,6 +203,10 @@ if exist "%VKSSBO_TEST_ROOT%\bench_cached.py" call :run_benchmark "FP16 cached o
 set "VKSSBO_ACT_FP16="
 if exist "%VKSSBO_TEST_ROOT%\bench_vae.py" call :run_benchmark "VAE convolution benchmark" "%VKSSBO_TEST_ROOT%\bench_vae.py" --runs 5 --warmup 2
 if exist "%VKSSBO_TEST_ROOT%\bench_fixed.py" call :run_benchmark "fixed overhead benchmark" "%VKSSBO_TEST_ROOT%\bench_fixed.py"
+if exist "%VKSSBO_TEST_ROOT%\bench_operator_profile.py" call :run_profile "operator profile matrix" "%VKSSBO_TEST_ROOT%\bench_operator_profile.py" --profile-set representative --warmup 1 --repeats 3
+set "VKSSBO_ACT_FP16=1"
+if exist "%VKSSBO_TEST_ROOT%\bench_operator_profile.py" call :run_profile "FP16 operator profile matrix" "%VKSSBO_TEST_ROOT%\bench_operator_profile.py" --profile-set representative --warmup 1 --repeats 3
+set "VKSSBO_ACT_FP16="
 
 :finish
 >> "%LOG%" echo.
@@ -154,7 +219,15 @@ if "%FAILED%"=="0" (
     >> "%LOG%" echo RESULT: FAIL
     echo UMA test completed: FAIL
 )
-echo Log: %LOG%
+move /y "%LOG%" "%FINAL_LOG%" >nul
+if errorlevel 1 (
+    if defined RUN_LOCK_HELD rmdir "%RUN_LOCK%" >nul 2>&1
+    echo ERROR: failed to promote the completed UMA log.
+    echo Temporary log: %LOG%
+    exit /b 3
+)
+if defined RUN_LOCK_HELD rmdir "%RUN_LOCK%" >nul 2>&1
+echo Log: %FINAL_LOG%
 exit /b %FAILED%
 
 :run_required
@@ -206,6 +279,23 @@ set "ARG2=%~4"
 if "%ARG1%"=="" ("%VKSSBO_TORCH_PYTHON%" "%SCRIPT%" >> "%LOG%" 2>&1) else if "%ARG2%"=="" ("%VKSSBO_TORCH_PYTHON%" "%SCRIPT%" "%ARG1%" >> "%LOG%" 2>&1) else ("%VKSSBO_TORCH_PYTHON%" "%SCRIPT%" "%ARG1%" "%ARG2%" >> "%LOG%" 2>&1)
 set "RC=%ERRORLEVEL%"
 >> "%LOG%" echo [exit] %LABEL% rc=!RC! (benchmark result retained; does not gate compatibility)
+exit /b 0
+
+:run_profile
+set "LABEL=%~1"
+set "SCRIPT=%~2"
+set "ARG1=%~3"
+set "ARG2=%~4"
+set "ARG3=%~5"
+set "ARG4=%~6"
+set "ARG5=%~7"
+set "ARG6=%~8"
+>> "%LOG%" echo.
+>> "%LOG%" echo [run] %LABEL% (diagnostic profile)
+>> "%LOG%" echo Command: "%VKSSBO_TORCH_PYTHON%" "%SCRIPT%" "%ARG1%" "%ARG2%" "%ARG3%" "%ARG4%" "%ARG5%" "%ARG6%"
+"%VKSSBO_TORCH_PYTHON%" "%SCRIPT%" "%ARG1%" "%ARG2%" "%ARG3%" "%ARG4%" "%ARG5%" "%ARG6%" >> "%LOG%" 2>&1
+set "RC=%ERRORLEVEL%"
+>> "%LOG%" echo [exit] %LABEL% rc=!RC! (profile result retained; does not gate compatibility)
 exit /b 0
 
 :run_resident_benchmark

@@ -1,4 +1,5 @@
 #include <ATen/native/vulkan/ops/Common.h>
+#include <ATen/native/vulkan/ops/NativeBuffer.h>
 #include <torch/library.h>
 
 namespace at {
@@ -73,6 +74,20 @@ Tensor permute_4d(
 }
 
 Tensor permute(const Tensor& self, IntArrayRef dims) {
+  if (is_native_buffer(self)) {
+    TORCH_CHECK(!self.requires_grad(), "Vulkan native permute supports inference only");
+    TORCH_CHECK(dims.size() == self.dim(), "number of dims don't match in permute");
+    std::vector<int64_t> sizes, strides;
+    std::vector<bool> seen(dims.size(), false);
+    for (const int64_t raw_dim : dims) {
+      const auto dim = maybe_wrap_dim(raw_dim, self.dim());
+      TORCH_CHECK(!seen[dim], "repeated dim in permute");
+      seen[dim] = true;
+      sizes.push_back(self.size(dim));
+      strides.push_back(self.stride(dim));
+    }
+    return convert(convert(self).buffer_strided_view(sizes, strides, self.storage_offset()));
+  }
   auto nDims = safe_downcast<uint32_t>(self.dim());
   TORCH_CHECK(
       dims.size() == (size_t)nDims, "number of dims don't match in permute");

@@ -22,6 +22,8 @@ class VulkanImplRegistrar {
 };
 
 at::Tensor& vulkan_copy_(at::Tensor& self, const at::Tensor& src);
+// Called after Python objects are finalized, before Windows unloads the ICD.
+TORCH_API void shutdown() noexcept;
 } // namespace vulkan
 
 namespace native {

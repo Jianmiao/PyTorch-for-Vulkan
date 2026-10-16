@@ -20,6 +20,10 @@
 #include <c10/core/DispatchKey.h>
 #include <c10/core/DispatchKeySet.h>
 
+#ifdef USE_VULKAN_API
+#include <ATen/native/vulkan/ops/SDPA.h>
+#endif
+
 #include <limits>
 #include <utility>
 
@@ -721,6 +725,19 @@ Tensor scaled_dot_product_attention(
     bool is_causal,
     std::optional<double> scale,
     bool enable_gqa) {
+#ifdef USE_VULKAN_API
+  // The public op is CompositeImplicitAutograd.  Route Vulkan inputs here,
+  // before backend dispatch, so mixed CPU masks do not change the dispatch
+  // key set and no global AutogradOther override is required.
+  if ((query_.defined() && query_.is_vulkan()) ||
+      (key.defined() && key.is_vulkan()) ||
+      (value.defined() && value.is_vulkan()) ||
+      (attn_mask_.has_value() && attn_mask_->defined() &&
+       attn_mask_->is_vulkan())) {
+    return at::native::vulkan::ops::scaled_dot_product_attention_vulkan(
+        query_, key, value, attn_mask_, dropout_p, is_causal, scale, enable_gqa);
+  }
+#endif
   using sdp::SDPBackend;
   validate_sdpa_input(query_, key, value, attn_mask_, dropout_p, is_causal, scale);
   // NB: This op is CompositeImplicitAutograd -- autograd traces through the

@@ -786,7 +786,14 @@ Tensor convolution(
     const IntArrayRef output_padding,
     const int64_t groups) {
   if (!transposed) {
-    Tensor r = at::native::vulkan::ops::ssbo::convolution(input, weight, bias, stride, padding, dilation, groups);
+    Tensor r;
+    if (input.dim() == 5) {
+      r = at::native::vulkan::ops::ssbo::conv3d(
+          input, weight, bias, stride, padding, dilation, groups);
+    } else {
+      r = at::native::vulkan::ops::ssbo::convolution(
+          input, weight, bias, stride, padding, dilation, groups);
+    }
     if (r.defined()) return r;
   }
   const Tensor weight_cpu = weight.is_vulkan() ? weight.to("cpu") : weight;

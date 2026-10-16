@@ -1,4 +1,5 @@
 #include <ATen/native/vulkan/ops/Common.h>
+#include <ATen/native/vulkan/ops/NativeBuffer.h>
 #include <torch/library.h>
 
 #ifndef AT_PER_OPERATOR_HEADERS
@@ -15,6 +16,9 @@ Tensor clone(
     const Tensor& src,
     std::optional<c10::MemoryFormat> optional_memory_format) {
   auto memory_format = optional_memory_format.value_or(MemoryFormat::Preserve);
+  TORCH_CHECK(!is_native_buffer(src) || src.is_contiguous() ||
+                  memory_format == MemoryFormat::Contiguous,
+              "Vulkan strided clone requires memory_format=torch.contiguous_format");
   TORCH_CHECK(
       (c10::MemoryFormat::Preserve == memory_format) ||
           (c10::MemoryFormat::Contiguous == memory_format),

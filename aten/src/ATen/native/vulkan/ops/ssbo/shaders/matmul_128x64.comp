@@ -1,0 +1,182 @@
+#version 450 core
+// SSBO tiled matmul, 16x16 workgroup (256 threads), 8x4 register blocking:
+// each workgroup covers a 128(m) x 64(n) output tile. Compared to the 64x64
+// tile of matmul.comp this halves both A and B global-memory re-reads, which
+// dominate on this iGPU (shared DDR bandwidth). K blocked by 16 in shared
+// memory, float16 storage, float32 accumulation.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer A { float16_t a[]; };
+layout(std430, binding = 1) readonly buffer BufB { float16_t b[]; };
+#ifdef F32_OUT
+layout(std430, binding = 2) writeonly buffer C { float c[]; };
+#else
+layout(std430, binding = 2) writeonly buffer C { float16_t c[]; };
+#endif
+layout(std430, binding = 3) readonly buffer Bias { float16_t bias[]; };
+
+shared float16_t ash[128][16];
+#ifdef BVEC2
+shared f16vec2 bsh[16][32];
+#else
+shared float16_t bsh[16][64];
+#endif
+
+layout(push_constant) uniform Params {
+  int B;
+  int M;
+  int K;
+  int N;
+  int transB;
+  int hasBias;
+  int tiles_y;
+  float scale;
+  int activation;
+} p;
+
+void main() {
+  uint tx = gl_LocalInvocationID.x;
+  uint ty = gl_LocalInvocationID.y;
+  uint n0 = gl_GlobalInvocationID.x * 4u;  // global x already includes tx*4
+  uint tile_id = gl_WorkGroupID.y + gl_WorkGroupID.z * uint(p.tiles_y);
+  uint m_tiles = (uint(p.M) + 127u) / 128u;
+  uint bi = tile_id / m_tiles;
+  uint mt = tile_id % m_tiles;
+  uint m0 = mt * 128u + ty * 8u;
+
+  float acc[8][4];
+  for (uint i = 0u; i < 8u; i++)
+    for (uint j = 0u; j < 4u; j++) acc[i][j] = 0.0;
+
+  uint ktiles = (uint(p.K) + 15u) / 16u;
+  for (uint kt = 0u; kt < ktiles; kt++) {
+    uint kcol = kt * 16u + tx;
+    uint krow = kt * 16u + ty;
+    for (uint i = 0u; i < 8u; i++) {
+      uint m = m0 + i;
+      if (p.transB == 3) {
+        // shared A (1x1 conv weights (M,K)): no batch offset
+        ash[ty * 8u + i][tx] = (m < uint(p.M) && kcol < uint(p.K))
+            ? a[m * uint(p.K) + kcol]
+            : float16_t(0.0);
+      } else {
+        ash[ty * 8u + i][tx] = (bi < uint(p.B) && m < uint(p.M) && kcol < uint(p.K))
+            ? a[bi * uint(p.M * p.K) + m * uint(p.K) + kcol]
+            : float16_t(0.0);
+      }
+    }
+#ifdef BVEC2
+    for (uint j = 0u; j < 2u; j++) {
+      uint n = n0 + j * 2u;
+      f16vec2 bv = f16vec2(0.0, 0.0);
+      if (p.transB == 0 || p.transB == 3) {
+        if (p.transB == 3) {
+          if (krow < uint(p.K) && n < uint(p.N)) {
+            bv.x = b[krow * uint(p.N) + n];
+            if (n + 1u < uint(p.N)) bv.y = b[krow * uint(p.N) + n + 1u];
+          }
+        } else if (bi < uint(p.B) && krow < uint(p.K) && n < uint(p.N)) {
+          uint boff = bi * uint(p.K * p.N) + krow * uint(p.N) + n;
+          bv.x = b[boff];
+          if (n + 1u < uint(p.N)) bv.y = b[boff + 1u];
+        }
+      } else if (p.transB == 2) {
+        if (krow < uint(p.K) && n < uint(p.N)) {
+          bv.x = b[n * uint(p.K) + krow];
+          if (n + 1u < uint(p.N)) bv.y = b[(n + 1u) * uint(p.K) + krow];
+        }
+      } else if (bi < uint(p.B) && krow < uint(p.K) && n < uint(p.N)) {
+        uint bbase = bi * uint(p.K * p.N);
+        bv.x = b[bbase + n * uint(p.K) + krow];
+        if (n + 1u < uint(p.N)) bv.y = b[bbase + (n + 1u) * uint(p.K) + krow];
+      }
+      bsh[ty][tx * 2u + j] = bv;
+    }
+#else
+    for (uint j = 0u; j < 4u; j++) {
+      uint n = n0 + j;
+      if (p.transB == 0 || p.transB == 3) {
+        // non-transposed: per-batch (0) or shared (3)
+        if (p.transB == 3) {
+          bsh[ty][tx * 4u + j] = (krow < uint(p.K) && n < uint(p.N))
+              ? b[krow * uint(p.N) + n]
+              : float16_t(0.0);
+        } else {
+          bsh[ty][tx * 4u + j] = (bi < uint(p.B) && krow < uint(p.K) && n < uint(p.N))
+              ? b[bi * uint(p.K * p.N) + krow * uint(p.N) + n]
+              : float16_t(0.0);
+        }
+      } else if (p.transB == 2) {
+        // shared transposed weight (N,K), no batch offset (linear)
+        bsh[ty][tx * 4u + j] = (krow < uint(p.K) && n < uint(p.N))
+            ? b[n * uint(p.K) + krow]
+            : float16_t(0.0);
+      } else {
+        // per-batch transposed (attention QK^T: B>1 with per-batch k)
+        bsh[ty][tx * 4u + j] = (bi < uint(p.B) && krow < uint(p.K) && n < uint(p.N))
+            ? b[bi * uint(p.K * p.N) + n * uint(p.K) + krow]
+            : float16_t(0.0);
+      }
+    }
+#endif
+    barrier();
+    for (uint kk = 0u; kk < 16u; kk++) {
+      float a0 = float(ash[ty * 8u + 0u][kk]);
+      float a1 = float(ash[ty * 8u + 1u][kk]);
+      float a2 = float(ash[ty * 8u + 2u][kk]);
+      float a3 = float(ash[ty * 8u + 3u][kk]);
+      float a4 = float(ash[ty * 8u + 4u][kk]);
+      float a5 = float(ash[ty * 8u + 5u][kk]);
+      float a6 = float(ash[ty * 8u + 6u][kk]);
+      float a7 = float(ash[ty * 8u + 7u][kk]);
+#ifdef BVEC2
+      f16vec2 bv01 = bsh[kk][tx * 2u + 0u];
+      f16vec2 bv23 = bsh[kk][tx * 2u + 1u];
+      float b0 = float(bv01.x), b1 = float(bv01.y);
+      float b2 = float(bv23.x), b3 = float(bv23.y);
+#else
+      float b0 = float(bsh[kk][tx * 4u + 0u]);
+      float b1 = float(bsh[kk][tx * 4u + 1u]);
+      float b2 = float(bsh[kk][tx * 4u + 2u]);
+      float b3 = float(bsh[kk][tx * 4u + 3u]);
+#endif
+      acc[0][0] += a0 * b0; acc[0][1] += a0 * b1; acc[0][2] += a0 * b2; acc[0][3] += a0 * b3;
+      acc[1][0] += a1 * b0; acc[1][1] += a1 * b1; acc[1][2] += a1 * b2; acc[1][3] += a1 * b3;
+      acc[2][0] += a2 * b0; acc[2][1] += a2 * b1; acc[2][2] += a2 * b2; acc[2][3] += a2 * b3;
+      acc[3][0] += a3 * b0; acc[3][1] += a3 * b1; acc[3][2] += a3 * b2; acc[3][3] += a3 * b3;
+      acc[4][0] += a4 * b0; acc[4][1] += a4 * b1; acc[4][2] += a4 * b2; acc[4][3] += a4 * b3;
+      acc[5][0] += a5 * b0; acc[5][1] += a5 * b1; acc[5][2] += a5 * b2; acc[5][3] += a5 * b3;
+      acc[6][0] += a6 * b0; acc[6][1] += a6 * b1; acc[6][2] += a6 * b2; acc[6][3] += a6 * b3;
+      acc[7][0] += a7 * b0; acc[7][1] += a7 * b1; acc[7][2] += a7 * b2; acc[7][3] += a7 * b3;
+    }
+    barrier();
+  }
+
+  if (bi < uint(p.B)) {
+    for (uint i = 0u; i < 8u; i++) {
+      uint m = m0 + i;
+      if (m >= uint(p.M)) continue;
+      for (uint j = 0u; j < 4u; j++) {
+        uint n = n0 + j;
+        if (n < uint(p.N)) {
+          float v = acc[i][j] * p.scale;
+          if (p.hasBias != 0) v += float(bias[n]);
+          if (p.activation == 1) {
+            v = v / (1.0 + exp(-v));
+          } else if (p.activation == 2) {
+            float v3 = v * v * v;
+            v = 0.5 * v * (1.0 + tanh(
+                0.7978845608028654 * (v + 0.044715 * v3)));
+          }
+#ifdef F32_OUT
+          c[bi * uint(p.M * p.N) + m * uint(p.N) + n] = v;
+#else
+          c[bi * uint(p.M * p.N) + m * uint(p.N) + n] = float16_t(v);
+#endif
+        }
+      }
+    }
+  }
+}

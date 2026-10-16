@@ -85,7 +85,8 @@ inline Tensor convert(const vTensor& tensor) {
       at::Device(at::kVulkan),
       tensor,
       tensor.sizes(),
-      tensor.strides());
+      tensor.strides(),
+      tensor.storage_offset());
 }
 
 inline Tensor convert_quantized(const vTensor& tensor) {
@@ -96,7 +97,8 @@ inline Tensor convert_quantized(const vTensor& tensor) {
       at::Device(at::kVulkan),
       tensor,
       tensor.sizes(),
-      tensor.strides());
+      tensor.strides(),
+      tensor.storage_offset());
 }
 
 inline vTensor& convert(const Tensor& tensor) {

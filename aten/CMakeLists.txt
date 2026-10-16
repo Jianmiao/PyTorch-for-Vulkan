@@ -56,6 +56,46 @@ list(APPEND ATen_CPU_INCLUDE ${TH_CPU_INCLUDE})
 
 if(USE_VULKAN)
   list(APPEND ATen_CPU_INCLUDE ${CMAKE_BINARY_DIR}/vulkan ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/VulkanMemoryAllocator)
+
+  # The SSBO memory policy is a pure-Rust static library. It receives
+  # accounting snapshots only; C++/VMA owns every Vulkan allocation.
+  set(VKSSBO_MEMORY_POLICY_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/src/ATen/native/vulkan/ops/ssbo/memory_policy")
+  find_program(VKSSBO_CARGO_EXECUTABLE cargo)
+  if(VKSSBO_CARGO_EXECUTABLE)
+    set(VKSSBO_RUST_TARGET_DIR "${CMAKE_BINARY_DIR}/vkssbo_memory_policy")
+    if(WIN32)
+      set(VKSSBO_MEMORY_POLICY_LIB
+          "${VKSSBO_RUST_TARGET_DIR}/release/vkssbo_memory_policy.lib")
+    else()
+      set(VKSSBO_MEMORY_POLICY_LIB
+          "${VKSSBO_RUST_TARGET_DIR}/release/libvkssbo_memory_policy.a")
+    endif()
+    add_custom_command(
+      OUTPUT "${VKSSBO_MEMORY_POLICY_LIB}"
+      COMMAND ${CMAKE_COMMAND} -E env
+              "CARGO_TARGET_DIR=${VKSSBO_RUST_TARGET_DIR}"
+              "${VKSSBO_CARGO_EXECUTABLE}" build
+              --manifest-path "${VKSSBO_MEMORY_POLICY_DIR}/Cargo.toml"
+              --release
+      DEPENDS
+        "${VKSSBO_MEMORY_POLICY_DIR}/Cargo.toml"
+        "${VKSSBO_MEMORY_POLICY_DIR}/Cargo.lock"
+        "${VKSSBO_MEMORY_POLICY_DIR}/include/memory_policy.h"
+        "${VKSSBO_MEMORY_POLICY_DIR}/src/lib.rs"
+      COMMENT "Building the vkssbo Rust memory policy"
+      VERBATIM)
+    add_custom_target(vkssbo_memory_policy_build
+                      DEPENDS "${VKSSBO_MEMORY_POLICY_LIB}")
+    add_library(vkssbo_memory_policy STATIC IMPORTED GLOBAL)
+    set_target_properties(vkssbo_memory_policy PROPERTIES
+      IMPORTED_LOCATION "${VKSSBO_MEMORY_POLICY_LIB}")
+    add_dependencies(vkssbo_memory_policy vkssbo_memory_policy_build)
+    list(APPEND ATen_CPU_DEPENDENCY_LIBS vkssbo_memory_policy)
+    message(STATUS "Vulkan SSBO Rust memory policy enabled")
+  else()
+    message(STATUS "Cargo not found; Vulkan SSBO Rust memory policy disabled")
+  endif()
 endif()
 
 # Find the HIP package, set the HIP paths, load the HIP CMake.

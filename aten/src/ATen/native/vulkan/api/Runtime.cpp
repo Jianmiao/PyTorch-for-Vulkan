@@ -12,6 +12,12 @@ namespace api {
 
 namespace {
 
+std::unique_ptr<Runtime>& runtime_owner() {
+  static std::unique_ptr<Runtime> value;
+  return value;
+}
+bool runtime_shutdown = false;
+
 void find_requested_layers_and_extensions(
     std::vector<const char*>& enabled_layers,
     std::vector<const char*>& enabled_extensions,
@@ -236,7 +242,7 @@ std::unique_ptr<Runtime> init_global_vulkan_runtime() {
 #else
       false;
 #endif /* VULKAN_DEBUG */
-  const bool initDefaultDevice = true;
+  const bool initDefaultDevice = false;
   const uint32_t numRequestedQueues = 1; // TODO: raise this value
 
   const RuntimeConfiguration default_config{
@@ -305,9 +311,30 @@ Runtime::~Runtime() {
   instance_ = VK_NULL_HANDLE;
 }
 
+bool Runtime::has_compute_device() const {
+  for (const auto& mapping : device_mappings_) {
+    if (mapping.first.num_compute_queues > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void Runtime::ensure_default_adapter() {
+  if (default_adapter_i_ != UINT32_MAX) {
+    return;
+  }
+  switch (config_.defaultSelector) {
+    case AdapterSelector::First:
+      default_adapter_i_ = create_adapter(select_first);
+      break;
+  }
+}
+
 Runtime::Runtime(Runtime&& other) noexcept
     : config_(other.config_),
       instance_(other.instance_),
+      device_mappings_(std::move(other.device_mappings_)),
       adapters_(std::move(other.adapters_)),
       default_adapter_i_(other.default_adapter_i_),
       debug_report_callback_(other.debug_report_callback_) {
@@ -347,15 +374,23 @@ Runtime* runtime() {
   // non-static function to ensure it has external linkage. If it were a global
   // static variable there would be one copy per translation unit that includes
   // Runtime.h as it would have internal linkage.
-  static const std::unique_ptr<Runtime> p_runtime =
-      init_global_vulkan_runtime();
+  VK_CHECK_COND(!runtime_shutdown, "Vulkan runtime has been shut down");
+  static Runtime* const p_runtime = [] {
+    runtime_owner() = init_global_vulkan_runtime();
+    return runtime_owner().get();
+  }();
 
   VK_CHECK_COND(
       p_runtime,
       "Pytorch Vulkan Runtime: The global runtime could not be retrieved "
       "because it failed to initialize.");
 
-  return p_runtime.get();
+  return p_runtime;
+}
+
+void shutdown_runtime() {
+  runtime_shutdown = true;
+  runtime_owner().reset();
 }
 
 } // namespace api

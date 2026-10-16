@@ -455,6 +455,10 @@ class SPVGenerator:
                 ]
 
                 if os.path.exists(spv_out_path):
+                    # Reuse an existing shader binary, but keep it in the
+                    # generated source map so incremental CMake reconfigure
+                    # does not silently emit an empty shader registry.
+                    output_file_map[spv_out_path] = glsl_out_path
                     continue
                 print("glslc cmd:", cmd)
                 subprocess.check_call(cmd)

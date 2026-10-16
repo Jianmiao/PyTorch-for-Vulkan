@@ -1,6 +1,8 @@
 #include <ATen/ATen.h>
 #include <ATen/native/vulkan/ops/Copy.h>
 #include <ATen/native/vulkan/ops/Utils.h>
+#include <ATen/native/vulkan/ops/NativeBuffer.h>
+#include <ATen/native/vulkan/ops/ssbo/SsboBackend.h>
 #include <ATen/vulkan/Context.h>
 
 namespace at {
@@ -128,6 +130,48 @@ static void transfer_vulkan_to_vulkan(vTensor& src, vTensor& dst) {
 
   api::PipelineBarrier pipeline_barrier{};
 
+  if (is_native_buffer_storage(src) || is_native_buffer_storage(dst)) {
+    TORCH_CHECK(is_native_buffer_storage(src) && is_native_buffer_storage(dst) &&
+                    src.dtype() == api::kFloat && dst.dtype() == api::kFloat,
+                "Vulkan native copy requires FP32 buffers on both sides");
+    if (src.buffer().handle() == dst.buffer().handle()) {
+      TORCH_CHECK(src.storage_offset() == dst.storage_offset() &&
+                      src.strides() == dst.strides() && src.sizes() == dst.sizes(),
+                  "Vulkan native copy between different views of the same buffer is unsupported");
+      return;
+    }
+    const auto& source = src.buffer(pipeline_barrier, api::PipelineStage::COMPUTE,
+                                    api::MemoryAccessType::READ);
+    auto& destination = dst.buffer(pipeline_barrier, api::PipelineStage::COMPUTE,
+                                    api::MemoryAccessType::WRITE);
+    native_strided_dispatch(context, pipeline_barrier, destination, source, dst.sizes(),
+                            dst.strides(), src.strides(), dst.storage_offset(), src.storage_offset());
+    native_buffer_counters().device_copies++;
+    return;
+  }
+
+  if (src.storage_type() == api::StorageType::BUFFER ||
+      dst.storage_type() == api::StorageType::BUFFER) {
+    TORCH_CHECK(src.storage_type() == dst.storage_type() &&
+                    src.dtype() == api::kFloat && dst.dtype() == api::kFloat &&
+                    src.gpu_memory_layout() == dst.gpu_memory_layout() &&
+                    src.gpu_nbytes() == dst.gpu_nbytes(),
+                "Vulkan buffer copy requires matching FP32 buffer layouts");
+    // Resolve barriers before submitting so argument evaluation order cannot
+    // omit dependencies. Same-buffer copy is a no-op.
+    if (src.buffer().handle() == dst.buffer().handle()) return;
+    auto& source = src.buffer(pipeline_barrier, api::PipelineStage::TRANSFER,
+                              api::MemoryAccessType::READ);
+    auto& destination = dst.buffer(pipeline_barrier, api::PipelineStage::TRANSFER,
+                                   api::MemoryAccessType::WRITE);
+    context->submit_copy<api::VulkanBuffer, api::VulkanBuffer>(
+        pipeline_barrier, source, destination,
+        {api::utils::safe_downcast<uint32_t>(src.gpu_nbytes()), 0u, 0u},
+        {0u, 0u, 0u}, {0u, 0u, 0u}, VK_NULL_HANDLE);
+    native_buffer_counters().device_copies++;
+    return;
+  }
+
   context->submit_copy<api::VulkanImage, api::VulkanImage>(
       // pipeline barrier
       pipeline_barrier,
@@ -152,8 +196,11 @@ static void transfer_vulkan_to_vulkan(vTensor& src, vTensor& dst) {
 void pack_cpu_to_vulkan(const Tensor& src, vTensor& dst) {
   api::Context* const context = api::context();
 
-  // Ensure that src is contiguous in its memory format
-  Tensor src_contig = src.contiguous(src.suggest_memory_format());
+  // Width-packed B1 buffers require ordinary contiguous CPU bytes. Texture
+  // storage keeps the existing memory-format packing behavior.
+  Tensor src_contig =
+      dst.storage_type() == api::StorageType::BUFFER ? src.contiguous()
+                                                     : src.contiguous(src.suggest_memory_format());
 
   // Note that the float data type has been enforced for the storage buffer
   // below. The reason for this is that the nchw_to_image and image_to_nchw
@@ -184,9 +231,16 @@ void pack_cpu_to_vulkan(const Tensor& src, vTensor& dst) {
     }
   }
   utils::pack_staging_to_vtensor(staging.buffer(), dst);
+  if (dst.storage_type() == api::StorageType::BUFFER) native_buffer_counters().uploads++;
 }
 
 void pack_vulkan_to_cpu(vTensor& src, Tensor& dst) {
+  if (src.storage_type() == api::StorageType::BUFFER && !dst.is_contiguous()) {
+    Tensor contiguous = at::empty(dst.sizes(), dst.options());
+    pack_vulkan_to_cpu(src, contiguous);
+    dst.copy_(contiguous);
+    return;
+  }
   TORCH_CHECK(
       !src.is_quantized(),
       "Copy of vulkan quantized tensors to cpu is currently disabled!");
@@ -242,6 +296,10 @@ void pack_vulkan_to_cpu(vTensor& src, Tensor& dst) {
 //
 
 Tensor& copy_(Tensor& dst, const Tensor& src) {
+  if (is_native_buffer(dst) || is_native_buffer(src)) {
+    TORCH_CHECK(dst.scalar_type() == kFloat && src.scalar_type() == kFloat,
+                "Vulkan native buffer copy currently requires float32 on both sides");
+  }
   // Check that sizes are equal
   TORCH_CHECK(
       dst.sizes() == src.sizes(), "Vulkan copy_: Tensor sizes are mismatched!");
@@ -253,6 +311,7 @@ Tensor& copy_(Tensor& dst, const Tensor& src) {
     // Vulkan -> Vulkan
     if (at::kVulkan == src.device().type()) {
       vTensor& v_src = convert(src);
+      ssbo::record_stock_vulkan_copy(src, dst);
       transfer_vulkan_to_vulkan(v_src, v_self);
     }
     // CPU -> Vulkan
@@ -267,6 +326,7 @@ Tensor& copy_(Tensor& dst, const Tensor& src) {
     // Vulkan -> CPU
     if (dst.device().is_cpu()) {
       pack_vulkan_to_cpu(v_src, dst);
+      if (v_src.storage_type() == api::StorageType::BUFFER) native_buffer_counters().downloads++;
     } else {
       TORCH_CHECK(false, "Unsupported!");
     }
@@ -285,14 +345,20 @@ vTensor to_vulkan(at::Tensor& src, const api::StorageType storage_type) {
       src.device().type() == at::kCPU,
       "Vulkan to_vulkan(): input tensor must be a CPU tensor!")
 
+  // The texture representation has a hard four-dimensional limit.  Use the
+  // linear buffer representation for higher-rank tensors so callers such as
+  // Conv3D can retain a real 5D Vulkan tensor instead of failing during copy.
+  const api::StorageType effective_storage =
+      src.dim() > 4 ? api::StorageType::BUFFER : storage_type;
   vTensor v_ret{
       api::context(),
       src.sizes().vec(),
       convert_dtype(src.scalar_type()),
-      storage_type,
-      get_gpu_memory_layout(storage_type, src.suggest_memory_format()),
+      effective_storage,
+      effective_storage == api::StorageType::BUFFER
+          ? api::GPUMemoryLayout::TENSOR_WIDTH_PACKED
+          : get_gpu_memory_layout(effective_storage, src.suggest_memory_format()),
   };
-
   ops::pack_cpu_to_vulkan(src, v_ret);
 
   return v_ret;

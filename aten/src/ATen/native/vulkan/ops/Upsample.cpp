@@ -103,7 +103,8 @@ static Tensor upsample_bilinear2d(
     bool align_corners,
     const std::optional<double> scales_h,
     const std::optional<double> scales_w) {
-  Tensor r = at::native::vulkan::ops::ssbo::upsample(input_arg, output_sizes, true);
+  Tensor r = at::native::vulkan::ops::ssbo::upsample(
+      input_arg, output_sizes, true, align_corners);
   if (r.defined()) return r;
   api::Context* const context = api::context();
 

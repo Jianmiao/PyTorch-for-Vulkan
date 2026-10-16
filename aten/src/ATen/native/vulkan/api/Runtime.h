@@ -89,6 +89,9 @@ class Runtime final {
     return default_adapter_i_;
   }
 
+  bool has_compute_device() const;
+  void ensure_default_adapter();
+
   using Selector =
       std::function<uint32_t(const std::vector<Runtime::DeviceMapping>&)>;
   uint32_t create_adapter(const Selector&);
@@ -97,6 +100,7 @@ class Runtime final {
 // The global runtime is retrieved using this function, where it is declared as
 // a static local variable.
 Runtime* runtime();
+void shutdown_runtime();
 
 } // namespace api
 } // namespace vulkan

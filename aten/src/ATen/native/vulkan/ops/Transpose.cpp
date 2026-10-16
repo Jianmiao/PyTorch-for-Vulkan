@@ -1,5 +1,6 @@
 #include <ATen/native/vulkan/ops/Common.h>
 #include <ATen/native/vulkan/ops/Utils.h>
+#include <ATen/native/vulkan/ops/NativeBuffer.h>
 #include <torch/library.h>
 
 namespace at {
@@ -74,6 +75,16 @@ Tensor transpose_4d(
 }
 
 Tensor transpose(const Tensor& self, int64_t index0, int64_t index1) {
+  if (is_native_buffer(self)) {
+    TORCH_CHECK(!self.requires_grad(), "Vulkan native transpose supports inference only");
+    index0 = maybe_wrap_dim(index0, self.dim());
+    index1 = maybe_wrap_dim(index1, self.dim());
+    auto sizes = self.sizes().vec();
+    auto strides = self.strides().vec();
+    std::swap(sizes[index0], sizes[index1]);
+    std::swap(strides[index0], strides[index1]);
+    return convert(convert(self).buffer_strided_view(sizes, strides, self.storage_offset()));
+  }
   TORCH_CHECK(
       self.dim() <= 4,
       "Vulkan transpose only supports tensors <= 4 dimensions");
@@ -133,6 +144,7 @@ Tensor transpose(const Tensor& self, int64_t index0, int64_t index1) {
 
 Tensor t(const Tensor& self) {
   TORCH_CHECK(self.dim() <= 2, "t() only supports tensors <= 2 dimensions");
+  if (is_native_buffer(self)) return transpose(self, 0, self.dim() < 2 ? 0 : 1);
   return transpose(self.detach(), 0, self.dim() < 2 ? 0 : 1);
 }
 

@@ -1,0 +1,109 @@
+#version 450 core
+// Fast 3x3 Conv2D path with a 32-channel input chunk and 32 output channels.
+// The larger shared tile removes one staging pass per output tile while
+// keeping the accumulator count at 32 fp32 values.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer X { float16_t x[]; };
+layout(std430, binding = 1) readonly buffer W { float16_t w[]; };
+layout(std430, binding = 2) readonly buffer Bias { float16_t bias[]; };
+#ifdef F32_OUT
+layout(std430, binding = 3) writeonly buffer Y { float y[]; };
+#else
+layout(std430, binding = 3) writeonly buffer Y { float16_t y[]; };
+#endif
+
+layout(push_constant) uniform Params {
+  int B, C, O, H, W, Ho, Wo, KH, KW, SH, SW, PH, PW, G;
+} p;
+
+// Shared storage: (18*18*32 + 32*32*9) * 2 = 39,168 bytes.
+shared float16_t xs[18][18][32];
+shared float16_t ws[32][32][9];
+
+void main() {
+  uint px = gl_LocalInvocationID.x;
+  uint py = gl_LocalInvocationID.y;
+  uint gx = gl_GlobalInvocationID.x;
+  uint gy = gl_GlobalInvocationID.y;
+  uint gx_tile = gl_WorkGroupID.x * 16u;
+  uint gy_tile = gl_WorkGroupID.y * 16u;
+  uint z = gl_GlobalInvocationID.z;
+
+  uint otiles = (uint(p.O) + 31u) / 32u;
+  uint batch = z / otiles;
+  uint out0 = (z % otiles) * 32u;
+  uint x_base = batch * uint(p.C * p.H * p.W);
+
+  float acc[32];
+  for (uint q = 0u; q < 32u; ++q) acc[q] = 0.0;
+
+  uint cchunks = (uint(p.C) + 31u) / 32u;
+  for (uint cc = 0u; cc < cchunks; ++cc) {
+    uint tile_count = 18u * 18u * 32u;
+    for (uint idx = gl_LocalInvocationIndex; idx < tile_count; idx += 256u) {
+      uint ch = idx % 32u;
+      uint rem = idx / 32u;
+      uint wx = rem % 18u;
+      uint wy = rem / 18u;
+      uint ic = cc * 32u + ch;
+      int ih = int(gy_tile) + int(wy) - p.PH;
+      int iw = int(gx_tile) + int(wx) - p.PW;
+      float16_t value = float16_t(0.0);
+      if (ic < uint(p.C) && ih >= 0 && ih < p.H && iw >= 0 && iw < p.W) {
+        value = x[x_base + ic * uint(p.H * p.W) + uint(ih) * uint(p.W) + uint(iw)];
+      }
+      xs[wy][wx][ch] = value;
+    }
+
+    uint weight_count = 32u * 32u * 9u;
+    for (uint idx = gl_LocalInvocationIndex; idx < weight_count; idx += 256u) {
+      uint kw = idx % 3u;
+      uint rem = idx / 3u;
+      uint kh = rem % 3u;
+      rem /= 3u;
+      uint ch = rem % 32u;
+      uint qo = rem / 32u;
+      uint ic = cc * 32u + ch;
+      float16_t value = float16_t(0.0);
+      if (ic < uint(p.C) && out0 + qo < uint(p.O)) {
+        value = w[(out0 + qo) * uint(p.C * 9u) + ic * 9u +
+                   kh * 3u + kw];
+      }
+      ws[qo][ch][kh * 3u + kw] = value;
+    }
+    barrier();
+
+    for (uint ch = 0u; ch < 32u; ++ch) {
+      for (uint kh = 0u; kh < uint(p.KH); ++kh) {
+        for (uint kw = 0u; kw < uint(p.KW); ++kw) {
+          float a = float(xs[py + kh][px + kw][ch]);
+          for (uint group = 0u; group < 8u; ++group) {
+            for (uint lane = 0u; lane < 4u; ++lane) {
+              uint q = group * 4u + lane;
+              acc[q] += a * float(ws[q][ch][kh * uint(p.KW) + kw]);
+            }
+          }
+        }
+      }
+    }
+    barrier();
+  }
+
+  if (gx < uint(p.Wo) && gy < uint(p.Ho)) {
+    uint y_base = batch * uint(p.O * p.Ho * p.Wo);
+    for (uint q = 0u; q < 32u; ++q) {
+      uint oo = out0 + q;
+      if (oo < uint(p.O)) {
+        float value = acc[q] + float(bias[oo]);
+#ifdef F32_OUT
+        y[y_base + oo * uint(p.Ho * p.Wo) + gy * uint(p.Wo) + gx] = value;
+#else
+        y[y_base + oo * uint(p.Ho * p.Wo) + gy * uint(p.Wo) + gx] = float16_t(value);
+#endif
+      }
+    }
+  }
+}

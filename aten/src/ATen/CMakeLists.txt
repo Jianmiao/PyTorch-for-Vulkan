@@ -115,6 +115,20 @@ file(GLOB native_mkldnn_cpp CONFIGURE_DEPENDS "native/mkldnn/*.cpp")
 file(GLOB vulkan_cpp CONFIGURE_DEPENDS "vulkan/*.cpp")
 file(GLOB native_vulkan_cpp CONFIGURE_DEPENDS "native/vulkan/*.cpp" "native/vulkan/api/*.cpp" "native/vulkan/impl/*.cpp" "native/vulkan/ops/*.cpp" "native/vulkan/ops/ssbo/*.cpp")
 
+if(USE_VULKAN AND VKSSBO_CARGO_EXECUTABLE)
+  # Keep the Rust ABI private to the two SSBO bridge translation units.  The
+  # imported static library is linked by torch_cpu, but unrelated ATen sources
+  # must not inherit its include path or compile definition.
+  set(VKSSBO_BRIDGE_SRCS ${native_vulkan_cpp})
+  list(FILTER VKSSBO_BRIDGE_SRCS INCLUDE REGEX
+       "native/vulkan/ops/ssbo/(api|SsboBackend)\\.cpp$")
+  set_source_files_properties(
+    ${VKSSBO_BRIDGE_SRCS}
+    PROPERTIES
+      COMPILE_DEFINITIONS VKSSBO_USE_RUST_MEMORY_POLICY
+      INCLUDE_DIRECTORIES "${VKSSBO_MEMORY_POLICY_DIR}/include")
+endif()
+
 file(GLOB native_eigen_cpp CONFIGURE_DEPENDS "native/sparse/eigen/*.cpp")
 
 # Metal

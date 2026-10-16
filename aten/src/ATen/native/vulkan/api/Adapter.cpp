@@ -102,6 +102,11 @@ VkDevice create_logical_device(
   std::vector<VkDeviceQueueCreateInfo> queue_create_infos;
   queue_create_infos.reserve(num_queues_to_create);
 
+  // VkDeviceCreateInfo retains pQueuePriorities until vkCreateDevice returns.
+  // The arrays therefore must outlive the queue-family loop below.
+  std::vector<std::vector<float>> queue_priorities;
+  queue_priorities.reserve(num_queues_to_create);
+
   std::vector<std::pair<uint32_t, uint32_t>> queues_to_get;
   queues_to_get.reserve(num_queues_to_create);
 
@@ -115,14 +120,14 @@ VkDevice create_logical_device(
       const uint32_t queues_to_init =
           std::min(remaining_queues, queue_properties.queueCount);
 
-      const std::vector<float> queue_priorities(queues_to_init, 1.0f);
+      queue_priorities.emplace_back(queues_to_init, 1.0f);
       queue_create_infos.push_back({
           VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, // sType
           nullptr, // pNext
           0u, // flags
           family_i, // queueFamilyIndex
           queues_to_init, // queueCount
-          queue_priorities.data(), // pQueuePriorities
+          queue_priorities.back().data(), // pQueuePriorities
       });
 
       for (size_t queue_i = 0; queue_i < queues_to_init; ++queue_i) {

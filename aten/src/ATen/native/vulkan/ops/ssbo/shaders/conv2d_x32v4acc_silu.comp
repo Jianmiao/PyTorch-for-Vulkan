@@ -1,0 +1,131 @@
+#version 450 core
+// Fused Conv2D + SiLU variant. It deliberately shares the proven x32v4acc
+// tiling and keeps the same 32 fp32 accumulator budget; only the final store
+// applies SiLU so the intermediate activation never leaves the shader.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer X { float16_t x[]; };
+layout(std430, binding = 1) readonly buffer W { float16_t w[]; };
+layout(std430, binding = 2) readonly buffer Bias { float16_t bias[]; };
+#ifdef F32_OUT
+layout(std430, binding = 3) writeonly buffer Y { float y[]; };
+#else
+layout(std430, binding = 3) writeonly buffer Y { float16_t y[]; };
+#endif
+
+layout(push_constant) uniform Params {
+  int B, C, O, H, W, Ho, Wo, KH, KW, SH, SW, PH, PW, G;
+} p;
+
+shared float16_t xs[18][18][16];
+shared f16vec4 ws4[8][16][9];
+
+float silu_value(float value) {
+  return value / (1.0 + exp(-value));
+}
+
+void main() {
+  uint px = gl_LocalInvocationID.x;
+  uint py = gl_LocalInvocationID.y;
+  uint gx = gl_GlobalInvocationID.x;
+  uint gy = gl_GlobalInvocationID.y;
+  uint gx_tile = gl_WorkGroupID.x * 16u;
+  uint gy_tile = gl_WorkGroupID.y * 16u;
+  uint z = gl_WorkGroupID.z;
+
+  uint otiles = (uint(p.O) + 31u) / 32u;
+  uint batch = z / otiles;
+  uint out0 = (z % otiles) * 32u;
+  uint x_base = batch * uint(p.C * p.H * p.W);
+
+  vec4 acc0 = vec4(0.0);
+  vec4 acc1 = vec4(0.0);
+  vec4 acc2 = vec4(0.0);
+  vec4 acc3 = vec4(0.0);
+  vec4 acc4 = vec4(0.0);
+  vec4 acc5 = vec4(0.0);
+  vec4 acc6 = vec4(0.0);
+  vec4 acc7 = vec4(0.0);
+
+  uint cchunks = (uint(p.C) + 15u) / 16u;
+  for (uint cc = 0u; cc < cchunks; ++cc) {
+    uint tile_count = 18u * 18u * 16u;
+    for (uint idx = gl_LocalInvocationIndex; idx < tile_count; idx += 256u) {
+      uint ch = idx % 16u;
+      uint rem = idx / 16u;
+      uint wx = rem % 18u;
+      uint wy = rem / 18u;
+      uint ic = cc * 16u + ch;
+      int ih = int(gy_tile) + int(wy) - p.PH;
+      int iw = int(gx_tile) + int(wx) - p.PW;
+      float16_t value = float16_t(0.0);
+      if (ic < uint(p.C) && ih >= 0 && ih < p.H && iw >= 0 && iw < p.W) {
+        value = x[x_base + ic * uint(p.H * p.W) + uint(ih) * uint(p.W) + uint(iw)];
+      }
+      xs[wy][wx][ch] = value;
+    }
+
+    uint weight_count = 8u * 16u * 9u;
+    for (uint idx = gl_LocalInvocationIndex; idx < weight_count; idx += 256u) {
+      uint kw = idx % 3u;
+      uint rem = idx / 3u;
+      uint kh = rem % 3u;
+      rem /= 3u;
+      uint ch = rem % 16u;
+      uint wp = rem / 16u;
+      uint oo = out0 + wp * 4u;
+      uint ic = cc * 16u + ch;
+      f16vec4 value = f16vec4(0.0);
+      if (ic < uint(p.C) && oo < uint(p.O)) {
+        uint stride = uint(p.C * 9u);
+        uint offset = oo * stride + ic * 9u + kh * 3u + kw;
+        value.x = w[offset];
+        if (oo + 1u < uint(p.O)) value.y = w[offset + stride];
+        if (oo + 2u < uint(p.O)) value.z = w[offset + 2u * stride];
+        if (oo + 3u < uint(p.O)) value.w = w[offset + 3u * stride];
+      }
+      ws4[wp][ch][kh * 3u + kw] = value;
+    }
+    barrier();
+
+    for (uint ch = 0u; ch < 16u; ++ch) {
+      for (uint kh = 0u; kh < uint(p.KH); ++kh) {
+        for (uint kw = 0u; kw < uint(p.KW); ++kw) {
+          float a = float(xs[py + kh][px + kw][ch]);
+          uint tap = kh * uint(p.KW) + kw;
+          vec4 av = vec4(a);
+          acc0 = fma(av, vec4(ws4[0][ch][tap]), acc0);
+          acc1 = fma(av, vec4(ws4[1][ch][tap]), acc1);
+          acc2 = fma(av, vec4(ws4[2][ch][tap]), acc2);
+          acc3 = fma(av, vec4(ws4[3][ch][tap]), acc3);
+          acc4 = fma(av, vec4(ws4[4][ch][tap]), acc4);
+          acc5 = fma(av, vec4(ws4[5][ch][tap]), acc5);
+          acc6 = fma(av, vec4(ws4[6][ch][tap]), acc6);
+          acc7 = fma(av, vec4(ws4[7][ch][tap]), acc7);
+        }
+      }
+    }
+    barrier();
+  }
+
+  if (gx < uint(p.Wo) && gy < uint(p.Ho)) {
+    uint y_base = batch * uint(p.O * p.Ho * p.Wo);
+    vec4 sums[8] = vec4[8](acc0, acc1, acc2, acc3, acc4, acc5, acc6, acc7);
+    for (uint block = 0u; block < 8u; ++block) {
+      for (uint lane = 0u; lane < 4u; ++lane) {
+        uint oo = out0 + block * 4u + lane;
+        if (oo < uint(p.O)) {
+          float value = silu_value(sums[block][lane] + float(bias[oo]));
+          uint index = y_base + oo * uint(p.Ho * p.Wo) + gy * uint(p.Wo) + gx;
+#ifdef F32_OUT
+          y[index] = value;
+#else
+          y[index] = float16_t(value);
+#endif
+        }
+      }
+    }
+  }
+}

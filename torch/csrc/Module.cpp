@@ -20,6 +20,9 @@
 
 #include <ATen/Parallel.h>
 #include <ATen/Utils.h>
+#ifdef _WIN32
+#include <ATen/vulkan/Context.h>
+#endif
 #include <ATen/dlpack.h>
 #include <ATen/native/ConvUtils.h>
 #include <ATen/native/ForeachUtils.h>
@@ -198,6 +201,12 @@ static PyObject* THPModule_initExtension(
     PyObject* _unused,
     PyObject* shm_manager_path) {
   HANDLE_TH_ERRORS
+#ifdef _WIN32
+  // Py_AtExit runs after Python module/tensor finalization but before process
+  // DLL detach. A Vulkan ICD must still be callable when its objects die.
+  static const int vulkan_exit_registered = Py_AtExit(at::vulkan::shutdown);
+  TORCH_CHECK(vulkan_exit_registered == 0, "Failed to register Vulkan cleanup");
+#endif
 #if !defined(FBCODE_CAFFE2) && !defined(__aarch64__)
   if (torch::get_cpp_stacktraces_enabled()) {
     c10::SetStackTraceFetcher([]() -> std::string {

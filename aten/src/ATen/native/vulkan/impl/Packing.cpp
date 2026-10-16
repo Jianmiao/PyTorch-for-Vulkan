@@ -2,6 +2,7 @@
 #include <ATen/native/vulkan/api/Utils.h>
 #include <ATen/native/vulkan/impl/Common.h>
 #include <ATen/native/vulkan/impl/Packing.h>
+#include <ATen/native/vulkan/ops/NativeBuffer.h>
 
 namespace at {
 namespace native {
@@ -232,6 +233,37 @@ void record_nchw_to_buffer_op(
     vTensor& v_dst,
     api::PipelineBarrier pipeline_barrier,
     VkFence fence_handle) {
+  if (ops::is_native_buffer_storage(v_dst)) {
+    auto& dst = v_dst.buffer(pipeline_barrier, api::PipelineStage::COMPUTE,
+                            api::MemoryAccessType::WRITE);
+    ops::native_strided_dispatch(context, pipeline_barrier, dst, src_buffer,
+        v_dst.sizes(), v_dst.strides(), ops::native_contiguous_strides(v_dst.sizes()),
+        v_dst.storage_offset(), 0, 0, fence_handle);
+    return;
+  }
+  // Rank-5+ tensors are stored as a contiguous linear SSBO.  There is no
+  // packing work to perform, and routing them through the legacy 4D metadata
+  // shader can misinterpret the folded width on some drivers.  A raw buffer
+  // copy preserves the logical layout exactly.
+  if (v_dst.gpu_memory_layout() == api::GPUMemoryLayout::TENSOR_WIDTH_PACKED &&
+      v_dst.gpu_numel() == v_dst.numel()) {
+    VK_CHECK_COND(
+        src_buffer.mem_size() == v_dst.gpu_nbytes(),
+        "Vulkan buffer copy: source and destination sizes differ");
+    context->submit_copy<api::VulkanBuffer, api::VulkanBuffer>(
+        pipeline_barrier,
+        src_buffer,
+        v_dst.buffer(
+            pipeline_barrier,
+            api::PipelineStage::TRANSFER,
+            api::MemoryAccessType::WRITE),
+        {static_cast<uint32_t>(src_buffer.mem_size()), 0u, 0u},
+        {0u, 0u, 0u},
+        {0u, 0u, 0u},
+        fence_handle);
+    return;
+  }
+
   uint32_t gpu_buf_len = api::utils::safe_downcast<uint32_t>(v_dst.gpu_numel());
 
   api::utils::uvec3 global_size = {gpu_buf_len, 1u, 1u};
@@ -267,6 +299,31 @@ bool record_buffer_to_nchw_op(
     api::VulkanBuffer& dst_buffer,
     api::PipelineBarrier pipeline_barrier,
     VkFence fence_handle) {
+  if (ops::is_native_buffer_storage(v_src)) {
+    const auto& src = v_src.buffer(pipeline_barrier, api::PipelineStage::COMPUTE,
+                                  api::MemoryAccessType::READ);
+    return ops::native_strided_dispatch(context, pipeline_barrier, dst_buffer, src,
+        v_src.sizes(), ops::native_contiguous_strides(v_src.sizes()), v_src.strides(),
+        0, v_src.storage_offset(), 0, fence_handle);
+  }
+  if (v_src.gpu_memory_layout() == api::GPUMemoryLayout::TENSOR_WIDTH_PACKED &&
+      v_src.gpu_numel() == v_src.numel()) {
+    VK_CHECK_COND(
+        dst_buffer.mem_size() == v_src.gpu_nbytes(),
+        "Vulkan buffer copy: source and destination sizes differ");
+    return context->submit_copy<api::VulkanBuffer, api::VulkanBuffer>(
+        pipeline_barrier,
+        v_src.buffer(
+            pipeline_barrier,
+            api::PipelineStage::TRANSFER,
+            api::MemoryAccessType::READ),
+        dst_buffer,
+        {static_cast<uint32_t>(dst_buffer.mem_size()), 0u, 0u},
+        {0u, 0u, 0u},
+        {0u, 0u, 0u},
+        fence_handle);
+  }
+
   uint32_t buf_len = api::utils::safe_downcast<uint32_t>(v_src.numel());
 
   api::utils::uvec3 global_size = {buf_len, 1u, 1u};

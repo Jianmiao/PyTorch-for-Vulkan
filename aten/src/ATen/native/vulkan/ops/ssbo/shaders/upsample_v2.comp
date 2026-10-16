@@ -1,0 +1,60 @@
+#version 450 core
+
+#extension GL_EXT_shader_16bit_storage : require
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer A { float16_t a[]; };
+layout(std430, binding = 1) writeonly buffer O { float16_t o[]; };
+
+layout(push_constant) uniform Params {
+  int B, C, H, W, Ho, Wo, mode;
+} p;
+
+void main() {
+  uint wx = gl_GlobalInvocationID.x;
+  uint wy = gl_GlobalInvocationID.y;
+  uint z = gl_GlobalInvocationID.z;
+  if (wx >= uint(p.Wo) || wy >= uint(p.Ho) || z >= uint(p.B * p.C)) return;
+
+  uint b = z / uint(p.C);
+  uint c = z % uint(p.C);
+  uint ibase = b * uint(p.C * p.H * p.W) + c * uint(p.H * p.W);
+  uint obase = b * uint(p.C * p.Ho * p.Wo) + c * uint(p.Ho * p.Wo);
+
+  if (p.mode == 0) {
+    uint ix = min(uint(float(wx) * float(p.W) / float(p.Wo)), uint(p.W - 1));
+    uint iy = min(uint(float(wy) * float(p.H) / float(p.Ho)), uint(p.H - 1));
+    o[obase + wy * uint(p.Wo) + wx] = a[ibase + iy * uint(p.W) + ix];
+    return;
+  }
+
+  float fx;
+  float fy;
+  if (p.mode == 2) {
+    fx = p.Wo > 1 ? float(wx) * float(p.W - 1) / float(p.Wo - 1) : 0.0;
+    fy = p.Ho > 1 ? float(wy) * float(p.H - 1) / float(p.Ho - 1) : 0.0;
+  } else {
+    fx = (float(wx) + 0.5) * float(p.W) / float(p.Wo) - 0.5;
+    fy = (float(wy) + 0.5) * float(p.H) / float(p.Ho) - 0.5;
+  }
+
+  // PyTorch's area-pixel rule clamps the source coordinate itself at the
+  // image boundary.  Clamping only the integer index would leave a non-zero
+  // fractional weight and incorrectly blend the first/last two pixels.
+  fx = clamp(fx, 0.0, float(p.W - 1));
+  fy = clamp(fy, 0.0, float(p.H - 1));
+
+  int x0 = clamp(int(floor(fx)), 0, p.W - 1);
+  int y0 = clamp(int(floor(fy)), 0, p.H - 1);
+  int x1 = min(x0 + 1, p.W - 1);
+  int y1 = min(y0 + 1, p.H - 1);
+  float tx = fx - floor(fx);
+  float ty = fy - floor(fy);
+  float v00 = float(a[ibase + uint(y0) * uint(p.W) + uint(x0)]);
+  float v01 = float(a[ibase + uint(y0) * uint(p.W) + uint(x1)]);
+  float v10 = float(a[ibase + uint(y1) * uint(p.W) + uint(x0)]);
+  float v11 = float(a[ibase + uint(y1) * uint(p.W) + uint(x1)]);
+  float top = v00 * (1.0 - tx) + v01 * tx;
+  float bot = v10 * (1.0 - tx) + v11 * tx;
+  o[obase + wy * uint(p.Wo) + wx] = float16_t(top * (1.0 - ty) + bot * ty);
+}

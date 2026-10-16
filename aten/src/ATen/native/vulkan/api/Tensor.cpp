@@ -1,7 +1,11 @@
 #include <ATen/native/vulkan/api/Tensor.h>
 #include <ATen/native/vulkan/api/Utils.h>
+#include <c10/core/Contiguity.h>
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <numeric>
 
 namespace at {
 namespace native {
@@ -103,6 +107,26 @@ std::vector<int64_t> calc_gpu_sizes(
     for (size_t i = 0; i < sizes.size(); i++) {
       gpu_sizes.at(i) = sizes.at(i);
     }
+
+    // B1 uses a linear FP32 buffer, not texture-style row padding. This also
+    // lets boundary copies bypass the legacy index-based packing shader.
+    static const bool native_buffer = [] {
+      const char* value = std::getenv("VK_NATIVE_BUFFER");
+      return value && std::strcmp(value, "1") == 0;
+    }();
+    if (native_buffer && memory_layout == api::GPUMemoryLayout::TENSOR_WIDTH_PACKED) {
+      return gpu_sizes;
+    }
+
+    // Higher-rank tensors use buffers specifically to provide a true linear
+    // SSBO representation.  Padding the last dimension here would introduce
+    // texture-style row gaps that cannot be represented by the compact 4D
+    // metadata ABI after dimensions are folded.  Keeping these buffers
+    // contiguous also matches the layout expected by native Conv3D and other
+    // rank-5 SSBO operators.
+    if (sizes.size() > 4) {
+      return gpu_sizes;
+    }
   }
   // For texture storage, tensors are typically stored using 3D image textures.
   // Batches are stacked along the depth dimension. To represent the physical
@@ -202,10 +226,29 @@ api::UniformParamsBuffer make_metadata_uniform(
     return api::UniformParamsBuffer();
   }
 
+  // Buffer shaders use a compact four-dimensional metadata ABI.  A buffer
+  // still keeps the original logical shape in vTensor::sizes_, but leading
+  // dimensions beyond NCHW can be folded into C without changing contiguous
+  // element order.  This is what allows SSBO operators to carry 5D activations
+  // (for example Conv3D) while texture-backed Vulkan operators remain 4D.
+  std::vector<int64_t> metadata_sizes = sizes;
+  std::vector<int64_t> metadata_strides = strides;
+  if (sizes.size() > 4) {
+    int64_t folded = 1;
+    for (size_t i = 0; i + 2 < sizes.size(); ++i) {
+      folded *= sizes[i];
+    }
+    metadata_sizes = {1, folded, sizes[sizes.size() - 2], sizes.back()};
+    metadata_strides = {
+        folded * sizes[sizes.size() - 2] * sizes.back(),
+        sizes[sizes.size() - 2] * sizes.back(),
+        sizes.back(),
+        1};
+  }
   vTensor::BufferMetadata metadata{
-      api::utils::make_whcn_uvec4(sizes),
-      api::utils::make_whcn_uvec4(strides),
-      api::utils::safe_downcast<uint32_t>(sizes.size()),
+      api::utils::make_whcn_uvec4(metadata_sizes),
+      api::utils::make_whcn_uvec4(metadata_strides),
+      api::utils::safe_downcast<uint32_t>(metadata_sizes.size()),
       api::utils::safe_downcast<uint32_t>(api::utils::multiply_integers(sizes)),
   };
 
@@ -282,9 +325,75 @@ vTensor::vTensor(
           gpu_sizes_,
           dtype_)) {}
 
+vTensor vTensor::buffer_view(const std::vector<int64_t>& sizes) const {
+  VK_CHECK_COND(buffer_is_contiguous(), "Vulkan buffer view requires contiguous input");
+  VK_CHECK_COND(api::utils::multiply_integers(sizes) == numel(),
+                "Vulkan buffer view must preserve element count");
+  return buffer_strided_view(sizes, calc_contiguous_strides(sizes), storage_offset_);
+}
+
+bool vTensor::buffer_is_contiguous() const {
+  return storage_type() == api::StorageType::BUFFER &&
+      c10::_compute_contiguous<int64_t>(sizes_, strides_, static_cast<int64_t>(numel()));
+}
+
+vTensor vTensor::buffer_strided_view(const std::vector<int64_t>& sizes,
+                                   const std::vector<int64_t>& strides,
+                                   const int64_t offset) const {
+  VK_CHECK_COND(storage_type() == api::StorageType::BUFFER && dtype_ == api::kFloat &&
+                    memory_layout_ == api::GPUMemoryLayout::TENSOR_WIDTH_PACKED,
+                "Vulkan buffer view requires native FP32 storage");
+  VK_CHECK_COND(!sizes.empty() && sizes.size() <= 4 && sizes.size() == strides.size(),
+                "Vulkan buffer view supports ranks 1 through 4");
+  const int64_t capacity = view_->buffer_.mem_size() / sizeof(float);
+  VK_CHECK_COND(offset >= 0 && offset < capacity && capacity <= 65535,
+                "Vulkan buffer view storage offset is out of bounds");
+  int64_t elements = 1;
+  int64_t last = offset;
+  std::vector<size_t> dimensions;
+  for (size_t i = 0; i < sizes.size(); ++i) {
+    const int64_t size = sizes[i];
+    VK_CHECK_COND(size > 0 && size <= 65535 / elements,
+                  "Vulkan buffer view requires 1..65535 elements");
+    elements *= size;
+    VK_CHECK_COND(strides[i] > 0 && strides[i] <= UINT32_MAX,
+                  "Vulkan buffer view requires positive uint32 strides");
+    if (size > 1) {
+      VK_CHECK_COND(strides[i] <= (capacity - 1 - last) / (size - 1),
+                    "Vulkan buffer view exceeds storage bounds");
+      last += (size - 1) * strides[i];
+      dimensions.push_back(i);
+    }
+  }
+  // Supported transposes/slices are nonoverlapping. Reject mappings that could
+  // make scatter writes race; arbitrary as_strided is not exposed here.
+  std::sort(dimensions.begin(), dimensions.end(),
+            [&](size_t a, size_t b) { return strides[a] < strides[b]; });
+  int64_t span = 1;
+  for (size_t i : dimensions) {
+    VK_CHECK_COND(strides[i] >= span, "Vulkan buffer view overlaps itself");
+    span += (sizes[i] - 1) * strides[i];
+  }
+  // virtual_resize may mutate cached UBOs shared with the base. Start with
+  // fresh metadata and share only the buffer and its barrier state.
+  vTensor result;
+  result.dtype_ = dtype_;
+  result.memory_layout_ = memory_layout_;
+  result.sizes_ = sizes;
+  result.strides_ = strides;
+  result.storage_offset_ = offset;
+  result.gpu_sizes_ = sizes;
+  result.gpu_strides_ = strides;
+  result.virtual_extents_ = {0u, 0u, 0u};
+  result.view_ = view_;
+  return result;
+}
+
 api::VulkanImage& vTensor::image(
     api::PipelineBarrier& pipeline_barrier,
     const api::PipelineStageFlags stage) const& {
+  VK_CHECK_COND(storage_type() != api::StorageType::BUFFER,
+                "Vulkan buffer tensor cannot be used by a texture-only operator");
   view_->transition(pipeline_barrier, stage, api::MemoryAccessType::READ);
   return view_->image_;
 }
@@ -293,6 +402,8 @@ api::VulkanImage& vTensor::image(
     api::PipelineBarrier& pipeline_barrier,
     const api::PipelineStageFlags stage,
     const api::MemoryAccessFlags access) & {
+  VK_CHECK_COND(storage_type() != api::StorageType::BUFFER,
+                "Vulkan buffer tensor cannot be used by a texture-only operator");
   view_->transition(pipeline_barrier, stage, access);
   return view_->image_;
 }
@@ -350,10 +461,26 @@ std::shared_ptr<api::UniformParamsBuffer> vTensor::extents_ubo() {
 }
 
 vTensor::BufferMetadata vTensor::get_cpu_buffer_metadata() const {
+  std::vector<int64_t> metadata_sizes = sizes_;
+  std::vector<int64_t> metadata_strides = strides_;
+  if (sizes_.size() > 4) {
+    int64_t folded = 1;
+    for (size_t i = 0; i + 2 < sizes_.size(); ++i) {
+      folded *= sizes_[i];
+    }
+    metadata_sizes = {1, folded, sizes_[sizes_.size() - 2], sizes_.back()};
+    // Vulkan buffer tensors are contiguous by construction.  Keep this
+    // metadata explicit so the shader does not see a truncated 5D stride.
+    metadata_strides = {
+        folded * sizes_[sizes_.size() - 2] * sizes_.back(),
+        sizes_[sizes_.size() - 2] * sizes_.back(),
+        sizes_.back(),
+        1};
+  }
   return {
-      api::utils::make_whcn_uvec4(sizes_),
-      api::utils::make_whcn_uvec4(strides_),
-      api::utils::safe_downcast<uint32_t>(sizes_.size()),
+      api::utils::make_whcn_uvec4(metadata_sizes),
+      api::utils::make_whcn_uvec4(metadata_strides),
+      api::utils::safe_downcast<uint32_t>(metadata_sizes.size()),
       api::utils::safe_downcast<uint32_t>(
           api::utils::multiply_integers(sizes_)),
   };
@@ -597,7 +724,12 @@ void vTensorStorage::transition(
     layout_changed = cur_layout != new_layout;
   }
 
-  if (prev_written || layout_changed) {
+  // Buffer storage has no image layout transition to serialize accesses. For
+  // the bounded native-buffer path, conservatively chain every subsequent
+  // access so a prior transfer read cannot race a later compute write.
+  const bool buffer_access_dependency =
+      buffer_ && prev_access != api::MemoryAccessType::NONE;
+  if (prev_written || layout_changed || buffer_access_dependency) {
     VkPipelineStageFlags src_stage = api::vk_stage(prev_stage);
     if (0u == src_stage) {
       src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;

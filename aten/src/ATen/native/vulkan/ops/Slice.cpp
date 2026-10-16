@@ -1,4 +1,5 @@
 #include <ATen/native/vulkan/ops/Common.h>
+#include <ATen/native/vulkan/ops/NativeBuffer.h>
 #include <torch/library.h>
 
 namespace at {
@@ -265,6 +266,17 @@ Tensor slice(
   }
 
   auto len = end_val - start_val;
+  if (is_native_buffer(self)) {
+    TORCH_CHECK(!self.requires_grad(), "Vulkan native slice supports inference only");
+    TORCH_CHECK(len > 0, "Vulkan native slice does not support empty results");
+    auto sizes = self.sizes().vec();
+    auto strides = self.strides().vec();
+    TORCH_CHECK(step <= UINT32_MAX / strides[dim], "Vulkan native slice step exceeds stride limit");
+    const int64_t offset = self.storage_offset() + start_val * strides[dim];
+    sizes[dim] = 1 + (len - 1) / step;
+    strides[dim] *= step;
+    return convert(convert(self).buffer_strided_view(sizes, strides, offset));
+  }
   newSizes[dim] = (len + step - 1) / step; // round-up
 
   // generalize into 4D tensor

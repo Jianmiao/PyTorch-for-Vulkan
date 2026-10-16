@@ -1,0 +1,60 @@
+#version 450 core
+// Correctness fallback for grouped, strided, and non-tiled convolutions.
+// One invocation computes one output value with fp32 accumulation.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer X { float16_t x[]; };
+layout(std430, binding = 1) readonly buffer W { float16_t w[]; };
+layout(std430, binding = 2) readonly buffer Bias { float16_t bias[]; };
+#ifdef F32_OUT
+layout(std430, binding = 3) writeonly buffer Y { float y[]; };
+#else
+layout(std430, binding = 3) writeonly buffer Y { float16_t y[]; };
+#endif
+
+layout(push_constant) uniform Params {
+  int B, C, O, H, W, Ho, Wo, KH, KW, SH, SW, DH, DW, PH, PW, G;
+} p;
+
+void main() {
+  uint wx = gl_GlobalInvocationID.x;
+  uint wy = gl_GlobalInvocationID.y;
+  uint z = gl_GlobalInvocationID.z;
+  if (wx >= uint(p.Wo) || wy >= uint(p.Ho)) return;
+
+  uint b = z / uint(p.O);
+  uint o = z % uint(p.O);
+  uint cpg = uint(p.C) / uint(p.G);
+  uint output_group = o / (uint(p.O) / uint(p.G));
+
+  float acc = 0.0;
+  uint x_base = b * uint(p.C * p.H * p.W);
+  for (uint i = 0; i < cpg; i++) {
+    uint input_channel = output_group * cpg + i;
+    uint w_base =
+        o * uint(cpg * p.KH * p.KW) + i * uint(p.KH * p.KW);
+    for (uint kh = 0; kh < uint(p.KH); kh++) {
+      int input_y = int(wy) * p.SH + int(kh) * p.DH - p.PH;
+      if (input_y < 0 || input_y >= p.H) continue;
+      for (uint kw = 0; kw < uint(p.KW); kw++) {
+        int input_x = int(wx) * p.SW + int(kw) * p.DW - p.PW;
+        if (input_x < 0 || input_x >= p.W) continue;
+        uint x_index =
+            x_base + input_channel * uint(p.H * p.W) +
+            uint(input_y) * uint(p.W) + uint(input_x);
+        uint w_index = w_base + kh * uint(p.KW) + kw;
+        acc += float(x[x_index]) * float(w[w_index]);
+      }
+    }
+  }
+
+  uint y_base =
+      b * uint(p.O * p.Ho * p.Wo) + o * uint(p.Ho * p.Wo);
+#ifdef F32_OUT
+  y[y_base + wy * uint(p.Wo) + wx] = acc + float(bias[o]);
+#else
+  y[y_base + wy * uint(p.Wo) + wx] = float16_t(acc + float(bias[o]));
+#endif
+}

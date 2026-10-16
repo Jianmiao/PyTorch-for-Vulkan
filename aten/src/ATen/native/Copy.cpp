@@ -322,14 +322,24 @@ Tensor copy(const Tensor& self, const Tensor& src, bool non_blocking) {
   // copy() is the "functional" form of copy_(). It exists so we can properly functionalize copy_(), but:
   // (1) It isn't exposed to the frontend (no python bindings)
   // (2) It isn't exposed to the backend (it's a composite, that decomposes into to() and expand_as() calls.
-  auto self_storage = self.unsafeGetTensorImpl()->unsafe_storage().unsafeGetStorageImpl();
   // If self has no real storage, we can't actually clone it.
   // Instead, generate an empty tensor with the right sizes/strides, since we should be able to assume
   // that copy_() will fully overwrite all data with that of src
-  if (self_storage->nbytes() == 0) {
+  // Opaque Vulkan tensors intentionally report no c10::Storage.  Check that
+  // contract before touching unsafe_storage(); the empty Storage has no
+  // StorageImpl and dereferencing it would turn a deterministic unsupported
+  // path into a process crash.
+  if (!self.has_storage()) {
     r = at::empty_strided(self.sizes(), self.strides(), self.options());
   } else {
-    r = clone_preserve_strides(self);
+    auto self_storage =
+        self.unsafeGetTensorImpl()->unsafe_storage().unsafeGetStorageImpl();
+    TORCH_INTERNAL_ASSERT(self_storage);
+    if (self_storage->nbytes() == 0) {
+      r = at::empty_strided(self.sizes(), self.strides(), self.options());
+    } else {
+      r = clone_preserve_strides(self);
+    }
   }
   r.copy_(src, non_blocking);
   return r;

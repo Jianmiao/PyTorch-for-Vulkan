@@ -20,6 +20,14 @@ namespace native {
 namespace vulkan {
 namespace api {
 
+namespace {
+std::unique_ptr<Context>& context_owner() {
+  static std::unique_ptr<Context> value;
+  return value;
+}
+bool context_shutdown = false;
+} // namespace
+
 Context::Context(size_t adapter_i, const ContextConfig& config)
     : config_(config),
       // Important handles
@@ -47,6 +55,10 @@ Context::Context(size_t adapter_i, const ContextConfig& config)
 
 Context::~Context() {
   try {
+    // Complete recorded commands before releasing resources they reference.
+    if (submit_count_ > 0) {
+      submit_cmd_to_gpu();
+    }
     flush();
     // Let the device know the context is done with the queue
     adapter_p_->return_queue(queue_);
@@ -146,11 +158,16 @@ void Context::flush() {
 }
 
 bool available() {
-  return context();
+  try {
+    return runtime()->has_compute_device();
+  } catch (...) {
+    return false;
+  }
 }
 
 Context* context() {
-  static const std::unique_ptr<Context> context([]() -> Context* {
+  VK_CHECK_COND(!context_shutdown, "Vulkan context has been shut down");
+  static Context* const context = []() -> Context* {
     try {
       const uint32_t submit_frequency = 16u;
 
@@ -179,14 +196,22 @@ Context* context() {
           query_pool_config, // queryPoolConfig
       };
 
-      return new Context(runtime()->default_adapter_i(), config);
+      Runtime* const rt = runtime();
+      rt->ensure_default_adapter();
+      context_owner().reset(new Context(rt->default_adapter_i(), config));
+      return context_owner().get();
     } catch (...) {
     }
 
     return nullptr;
-  }());
+  }();
 
-  return context.get();
+  return context;
+}
+
+void shutdown_context() {
+  context_shutdown = true;
+  context_owner().reset();
 }
 
 //

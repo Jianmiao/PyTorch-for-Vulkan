@@ -1,0 +1,122 @@
+#version 450 core
+// Tiled SSBO matmul with optional bias fusion.
+// A 64x64 output tile is computed by a 16x16 workgroup using float32
+// accumulators and float16 storage. The four-binding ABI is shared by mm,
+// bmm, and inference linear (binding 3 is a dummy buffer when no bias exists).
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer A { float16_t a[]; };
+layout(std430, binding = 1) readonly buffer BufB { float16_t b[]; };
+#ifdef F32_OUT
+layout(std430, binding = 2) writeonly buffer C { float c[]; };
+#else
+layout(std430, binding = 2) writeonly buffer C { float16_t c[]; };
+#endif
+layout(std430, binding = 3) readonly buffer Bias { float16_t bias[]; };
+
+shared float16_t ash[64][16];
+shared float16_t bsh[16][64];
+
+layout(push_constant) uniform Params {
+  int B;
+  int M;
+  int K;
+  int N;
+  int transB;
+  int hasBias;
+  int tiles_y;
+  float scale;
+  int activation;
+} p;
+
+void main() {
+  uint tx = gl_LocalInvocationID.x;
+  uint ty = gl_LocalInvocationID.y;
+  uint n0 = gl_WorkGroupID.x * 64u + tx * 4u;
+  uint tile_id = gl_WorkGroupID.y + gl_WorkGroupID.z * uint(p.tiles_y);
+  uint m_tiles = (uint(p.M) + 63u) / 64u;
+  uint bi = tile_id / m_tiles;
+  uint mt = tile_id % m_tiles;
+  uint m0 = mt * 64u + ty * 4u;
+
+  float acc[4][4];
+  for (uint i = 0u; i < 4u; i++)
+    for (uint j = 0u; j < 4u; j++) acc[i][j] = 0.0;
+
+  uint ktiles = (uint(p.K) + 15u) / 16u;
+  for (uint kt = 0u; kt < ktiles; kt++) {
+    uint kcol = kt * 16u + tx;
+    uint krow = kt * 16u + ty;
+    for (uint i = 0u; i < 4u; i++) {
+      uint m = m0 + i;
+      if (p.transB == 3) {
+        ash[ty * 4u + i][tx] = (m < uint(p.M) && kcol < uint(p.K))
+            ? a[m * uint(p.K) + kcol] : float16_t(0.0);
+      } else {
+        ash[ty * 4u + i][tx] = (bi < uint(p.B) && m < uint(p.M) && kcol < uint(p.K))
+            ? a[bi * uint(p.M * p.K) + m * uint(p.K) + kcol]
+            : float16_t(0.0);
+      }
+    }
+    for (uint j = 0u; j < 4u; j++) {
+      uint n = n0 + j;
+      if (p.transB == 0 || p.transB == 3) {
+        bsh[ty][tx * 4u + j] = (krow < uint(p.K) && n < uint(p.N) &&
+            (p.transB == 3 || bi < uint(p.B)))
+            ? b[(p.transB == 3 ? 0u : bi * uint(p.K * p.N)) +
+                krow * uint(p.N) + n] : float16_t(0.0);
+      } else if (p.transB == 2) {
+        bsh[ty][tx * 4u + j] = (krow < uint(p.K) && n < uint(p.N))
+            ? b[n * uint(p.K) + krow] : float16_t(0.0);
+      } else {
+        bsh[ty][tx * 4u + j] = (bi < uint(p.B) && krow < uint(p.K) && n < uint(p.N))
+            ? b[bi * uint(p.K * p.N) + n * uint(p.K) + krow]
+            : float16_t(0.0);
+      }
+    }
+    barrier();
+    for (uint kk = 0u; kk < 16u; kk++) {
+      float a0 = float(ash[ty * 4u + 0u][kk]);
+      float a1 = float(ash[ty * 4u + 1u][kk]);
+      float a2 = float(ash[ty * 4u + 2u][kk]);
+      float a3 = float(ash[ty * 4u + 3u][kk]);
+      float b0 = float(bsh[kk][tx * 4u + 0u]);
+      float b1 = float(bsh[kk][tx * 4u + 1u]);
+      float b2 = float(bsh[kk][tx * 4u + 2u]);
+      float b3 = float(bsh[kk][tx * 4u + 3u]);
+      acc[0][0] += a0 * b0; acc[0][1] += a0 * b1; acc[0][2] += a0 * b2; acc[0][3] += a0 * b3;
+      acc[1][0] += a1 * b0; acc[1][1] += a1 * b1; acc[1][2] += a1 * b2; acc[1][3] += a1 * b3;
+      acc[2][0] += a2 * b0; acc[2][1] += a2 * b1; acc[2][2] += a2 * b2; acc[2][3] += a2 * b3;
+      acc[3][0] += a3 * b0; acc[3][1] += a3 * b1; acc[3][2] += a3 * b2; acc[3][3] += a3 * b3;
+    }
+    barrier();
+  }
+
+  if (bi < uint(p.B)) {
+    for (uint i = 0u; i < 4u; i++) {
+      uint m = m0 + i;
+      if (m >= uint(p.M)) continue;
+      for (uint j = 0u; j < 4u; j++) {
+        uint n = n0 + j;
+        if (n < uint(p.N)) {
+          float v = acc[i][j] * p.scale;
+          if (p.hasBias != 0) v += float(bias[n]);
+          if (p.activation == 1) {
+            v = v / (1.0 + exp(-v));
+          } else if (p.activation == 2) {
+            float v3 = v * v * v;
+            v = 0.5 * v * (1.0 + tanh(
+                0.7978845608028654 * (v + 0.044715 * v3)));
+          }
+#ifdef F32_OUT
+          c[bi * uint(p.M * p.N) + m * uint(p.N) + n] = v;
+#else
+          c[bi * uint(p.M * p.N) + m * uint(p.N) + n] = float16_t(v);
+#endif
+        }
+      }
+    }
+  }
+}

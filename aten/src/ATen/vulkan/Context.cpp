@@ -11,6 +11,13 @@ namespace vulkan {
 
 std::atomic<const VulkanImplInterface*> g_vulkan_impl_registry;
 
+void shutdown() noexcept {
+#ifdef USE_VULKAN_API
+  native::vulkan::api::shutdown_context();
+  native::vulkan::api::shutdown_runtime();
+#endif
+}
+
 VulkanImplRegistrar::VulkanImplRegistrar(VulkanImplInterface* impl) {
   g_vulkan_impl_registry.store(impl);
 }
